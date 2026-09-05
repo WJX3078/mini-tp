@@ -1,0 +1,32 @@
+[project]
+name = "mini-tp"
+version = "0.1.0"
+description = "From-scratch Tensor Parallel LLM inference runtime (educational)"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.51",
+    "safetensors",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[tool.setuptools]
+packages = ["minitp", "minitp.distributed", "minitp.parallel", "minitp.bench"]
+
+[tool.pytest.ini_options]
+markers = [
+    "distributed: multi-process distributed tests (CPU Gloo or GPU NCCL)",
+    "multi_gpu: requires >=2 CUDA GPUs",
+    "slow: long-running tests",
+    "model: requires the real Qwen checkpoint (network/HF cache)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
