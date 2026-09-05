@@ -118,7 +118,7 @@ minitp/
   weight_loader.py  HF checkpoint → per-rank shards
   generation.py  prefill + KV-cache decode + distributed greedy sampling
   generate.py    CLI          bench/  benchmark + communication/memory tooling
-docs/            DESIGN, QWEN_WEIGHT_MAPPING, REVIEW, INTERVIEW_GUIDE, RESUME_BULLETS
+docs/            DESIGN, QWEN_WEIGHT_MAPPING, REVIEW
 ```
 
 ## Scope & known limitations
