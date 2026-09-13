@@ -153,7 +153,7 @@ def bench_bookkeeping(steps: int = 256) -> dict:
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description="mini-TP hot-path microbenchmarks")
     p.add_argument("--iters", type=int, default=200)
-    args = p.parse_args(argv)
+    p.parse_args(argv)
 
     rows = [
         bench_rope(1, 1),
