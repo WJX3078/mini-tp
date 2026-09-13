@@ -84,15 +84,8 @@ class TPQwen2Attention(nn.Module):
                 k = k.expand(b, self.q_heads_local, k.shape[2], self.head_dim)
                 v = v.expand(b, self.q_heads_local, v.shape[2], self.head_dim)
             else:
-                # Fold the KV-head dim into the batch dim instead of
-                # materializing group-expanded k/v copies (repeat_interleave
-                # cost 6.1 ms/token at TP=1 in the v0.3 profile): one small q
-                # reshape-copy replaces two k/v copies that are `group`x larger.
-                # The q view is then [B*kv, group, T, D]; head h of batch b
-                # uses KV head b exactly as repeat_interleave would.
-                q = q.reshape(b * self.kv_heads_local, group, t, self.head_dim)
-                k = k.reshape(b * self.kv_heads_local, 1, k.shape[2], self.head_dim)
-                v = v.reshape(b * self.kv_heads_local, 1, v.shape[2], self.head_dim)
+                k = k.repeat_interleave(group, dim=1)
+                v = v.repeat_interleave(group, dim=1)
 
         if t == 1:
             out = F.scaled_dot_product_attention(q, k, v)
@@ -107,8 +100,5 @@ class TPQwen2Attention(nn.Module):
             )
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 
-        if self.kv_heads_local > 1 and self.q_heads_local != self.kv_heads_local:
-            # undo the batch-fold: [B*kv, g, T, D] -> [B, H, T, D]
-            out = out.view(b, self.kv_heads_local, group, t, self.head_dim).flatten(1, 2)
         out = out.transpose(1, 2).reshape(b, t, self.q_local)
         return self.o_proj(out)
