@@ -221,7 +221,7 @@ def load_qwen2_tp(
                 plan, q_rows, kv_rows = _qkv_slices(cfg, rank, tp, attn)
                 _fill_dest(sd[f"{attn}qkv_proj.weight"], reader, plan, dtype)
                 if reader.has(f"{attn}q_proj.bias"):
-                    bias_plan = [(n.replace(".weight", ".bias"), d, s, l, r) for n, d, s, l, r in plan]
+                    bias_plan = [(n.replace(".weight", ".bias"), d, s, length, r) for n, d, s, length, r in plan]
                     _fill_dest(sd[f"{attn}qkv_proj.bias"], reader, bias_plan, dtype)
                 o_start, o_len = shard_len(cfg.hidden_size, rank, tp)
                 sd[f"{attn}o_proj.weight"].copy_(

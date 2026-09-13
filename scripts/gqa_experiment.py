@@ -46,10 +46,10 @@ for label, qh, kvh in [("TP=1 (14Q/2KV)", 14, 2), ("TP=2 (7Q/1KV)", 7, 1)]:
             k_m = k.repeat_interleave(g, dim=1)
             v_m = v.repeat_interleave(g, dim=1)
 
-        def manual():
+        def manual(q=q, k_m=k_m, v_m=v_m, T=T):
             return F.scaled_dot_product_attention(q, k_m, v_m, is_causal=(T > 1))
 
-        def native():
+        def native(q=q, k=k, v=v, T=T):
             return F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1), enable_gqa=True)
 
         d = (manual().float() - native().float()).abs().max().item()

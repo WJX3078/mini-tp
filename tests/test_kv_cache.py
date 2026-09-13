@@ -5,7 +5,6 @@ assert every output logit is finite — if any unwritten slot leaked into
 attention, NaNs would propagate.
 """
 
-import pytest
 import torch
 
 from minitp.config import ModelConfig

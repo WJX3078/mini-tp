@@ -21,7 +21,6 @@ Output: JSON per config on stdout + benchmarks/results/ablation_<ts>.json.
 from __future__ import annotations
 
 import argparse
-import copy
 import datetime as dt
 import json
 import sys
@@ -31,7 +30,7 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig
 
-from minitp.bench.benchmark import bench_one_iter, _percentiles
+from minitp.bench.benchmark import _percentiles, bench_one_iter
 from minitp.config import ModelConfig
 from minitp.distributed.context import init_context
 from minitp.weight_loader import load_qwen2_tp
@@ -76,7 +75,6 @@ def count_kernels(model, ids, steps: int = 5) -> int:
 
     from minitp.generation import make_kv_cache
 
-    device = ids.device
     kv = make_kv_cache(model, ids.shape[0], ids.shape[1] + steps + 1)
     with torch.no_grad():
         logits, kv = prefill_wrapped(model, ids, kv)

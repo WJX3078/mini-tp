@@ -84,22 +84,33 @@ def main_from_args(args_dict: dict) -> None:
             n = size // dtype.itemsize
             if op == "all_reduce":
                 t = torch.ones(n, device=device, dtype=dtype)
-                run = lambda: dist.all_reduce(t)  # noqa: E731
+
+                def run(t=t):  # noqa: B008
+                    dist.all_reduce(t)
+
                 payload = n * dtype.itemsize
             elif op == "all_gather":
                 t = torch.ones(n // world, device=device, dtype=dtype)
                 out = torch.empty(n, device=device, dtype=dtype)
-                run = lambda: dist.all_gather_into_tensor(out, t) if use_cuda else None  # noqa: E731
-                if not use_cuda:  # gloo list path
+                if use_cuda:
+
+                    def run(t=t, out=out):  # noqa: B008
+                        dist.all_gather_into_tensor(out, t)
+
+                else:
                     parts = [torch.empty_like(t) for _ in range(world)]
 
-                    def run():  # noqa: F811
+                    def run(t=t, parts=parts):  # noqa: B008
                         dist.all_gather(parts, t)
+
                 payload = n * dtype.itemsize
             else:
                 full = torch.ones(n * world, device=device, dtype=dtype)
                 out = torch.empty(n, device=device, dtype=dtype)
-                run = lambda: dist.reduce_scatter_tensor(out, full)  # noqa: E731
+
+                def run(full=full, out=out):  # noqa: B008
+                    dist.reduce_scatter_tensor(out, full)
+
                 payload = n * world * dtype.itemsize  # input is the logical payload
 
             for _ in range(warmup):

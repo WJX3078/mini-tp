@@ -163,10 +163,10 @@ def bench_embedding(iters, warmup) -> list[dict]:
         mask = (ids >= 0) & (ids < 151936)
         local_ids = (ids - 0).clamp(min=0) * mask
 
-        def old_masked():
+        def old_masked(local_ids=local_ids, mask=mask, table=table):
             return F.embedding(local_ids, table) * mask.unsqueeze(-1).to(table.dtype)
 
-        def fast():
+        def fast(ids=ids, table=table):
             return F.embedding(ids, table)
 
         torch.testing.assert_close(fast().float(), old_masked().float())
