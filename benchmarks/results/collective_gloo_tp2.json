@@ -1,0 +1,367 @@
+{
+ "schema": "minitp.collective_bench/1",
+ "world_size": 2,
+ "backend": "gloo",
+ "device": "cpu",
+ "iters": 20,
+ "qwen_decode_allreduce_bytes": 1792,
+ "rows": [
+  {
+   "op": "all_reduce",
+   "payload_bytes": 1024,
+   "latency_us": 590.7,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 2048,
+   "latency_us": 599.8,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 4096,
+   "latency_us": 562.7,
+   "algbw_GBps": 0.01,
+   "busbw_GBps": 0.01
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 8192,
+   "latency_us": 588.6,
+   "algbw_GBps": 0.01,
+   "busbw_GBps": 0.01
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 16384,
+   "latency_us": 629.4,
+   "algbw_GBps": 0.02,
+   "busbw_GBps": 0.02
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 32768,
+   "latency_us": 622.2,
+   "algbw_GBps": 0.05,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 65536,
+   "latency_us": 641.1,
+   "algbw_GBps": 0.1,
+   "busbw_GBps": 0.1
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 131072,
+   "latency_us": 1048.2,
+   "algbw_GBps": 0.12,
+   "busbw_GBps": 0.12
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 262144,
+   "latency_us": 1177.9,
+   "algbw_GBps": 0.21,
+   "busbw_GBps": 0.21
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 524288,
+   "latency_us": 2754.4,
+   "algbw_GBps": 0.18,
+   "busbw_GBps": 0.18
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 1048576,
+   "latency_us": 12989.0,
+   "algbw_GBps": 0.08,
+   "busbw_GBps": 0.08
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 2097152,
+   "latency_us": 28672.7,
+   "algbw_GBps": 0.07,
+   "busbw_GBps": 0.07
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 4194304,
+   "latency_us": 32018.7,
+   "algbw_GBps": 0.12,
+   "busbw_GBps": 0.12
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 8388608,
+   "latency_us": 67504.5,
+   "algbw_GBps": 0.12,
+   "busbw_GBps": 0.12
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 16777216,
+   "latency_us": 144223.4,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.11
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 33554432,
+   "latency_us": 294113.6,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.11
+  },
+  {
+   "op": "all_reduce",
+   "payload_bytes": 67108864,
+   "latency_us": 583068.2,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.11
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 1024,
+   "latency_us": 465.6,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 2048,
+   "latency_us": 501.1,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 4096,
+   "latency_us": 456.6,
+   "algbw_GBps": 0.01,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 8192,
+   "latency_us": 485.0,
+   "algbw_GBps": 0.02,
+   "busbw_GBps": 0.01
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 16384,
+   "latency_us": 479.5,
+   "algbw_GBps": 0.03,
+   "busbw_GBps": 0.02
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 32768,
+   "latency_us": 482.6,
+   "algbw_GBps": 0.06,
+   "busbw_GBps": 0.03
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 65536,
+   "latency_us": 543.3,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.06
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 131072,
+   "latency_us": 520.2,
+   "algbw_GBps": 0.23,
+   "busbw_GBps": 0.12
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 262144,
+   "latency_us": 819.1,
+   "algbw_GBps": 0.3,
+   "busbw_GBps": 0.15
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 524288,
+   "latency_us": 2381.2,
+   "algbw_GBps": 0.21,
+   "busbw_GBps": 0.1
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 1048576,
+   "latency_us": 9255.5,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 2097152,
+   "latency_us": 15594.1,
+   "algbw_GBps": 0.13,
+   "busbw_GBps": 0.06
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 4194304,
+   "latency_us": 15639.1,
+   "algbw_GBps": 0.25,
+   "busbw_GBps": 0.12
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 8388608,
+   "latency_us": 25492.7,
+   "algbw_GBps": 0.31,
+   "busbw_GBps": 0.15
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 16777216,
+   "latency_us": 40097.9,
+   "algbw_GBps": 0.39,
+   "busbw_GBps": 0.19
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 33554432,
+   "latency_us": 62874.8,
+   "algbw_GBps": 0.5,
+   "busbw_GBps": 0.25
+  },
+  {
+   "op": "all_gather",
+   "payload_bytes": 67108864,
+   "latency_us": 101929.9,
+   "algbw_GBps": 0.61,
+   "busbw_GBps": 0.31
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 2048,
+   "latency_us": 1191.2,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 4096,
+   "latency_us": 1156.7,
+   "algbw_GBps": 0.0,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 8192,
+   "latency_us": 1121.0,
+   "algbw_GBps": 0.01,
+   "busbw_GBps": 0.0
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 16384,
+   "latency_us": 1203.8,
+   "algbw_GBps": 0.01,
+   "busbw_GBps": 0.01
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 32768,
+   "latency_us": 1262.0,
+   "algbw_GBps": 0.02,
+   "busbw_GBps": 0.01
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 65536,
+   "latency_us": 1161.9,
+   "algbw_GBps": 0.05,
+   "busbw_GBps": 0.03
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 131072,
+   "latency_us": 1221.2,
+   "algbw_GBps": 0.1,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 262144,
+   "latency_us": 1414.2,
+   "algbw_GBps": 0.17,
+   "busbw_GBps": 0.09
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 524288,
+   "latency_us": 3833.7,
+   "algbw_GBps": 0.13,
+   "busbw_GBps": 0.06
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 1048576,
+   "latency_us": 16337.0,
+   "algbw_GBps": 0.06,
+   "busbw_GBps": 0.03
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 2097152,
+   "latency_us": 31976.1,
+   "algbw_GBps": 0.06,
+   "busbw_GBps": 0.03
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 4194304,
+   "latency_us": 34731.6,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.06
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 8388608,
+   "latency_us": 84602.9,
+   "algbw_GBps": 0.09,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 16777216,
+   "latency_us": 155524.1,
+   "algbw_GBps": 0.1,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 33554432,
+   "latency_us": 292517.2,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 67108864,
+   "latency_us": 592708.4,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.05
+  },
+  {
+   "op": "reduce_scatter",
+   "payload_bytes": 134217728,
+   "latency_us": 1161049.6,
+   "algbw_GBps": 0.11,
+   "busbw_GBps": 0.05
+  }
+ ]
+}
