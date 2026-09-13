@@ -19,13 +19,15 @@ class TPQwen2MLP(nn.Module):
     """gate/up fused ColumnParallel (intermediate stays sharded, zero comm in
     between), local SiLU gating, down RowParallel with one AllReduce."""
 
-    def __init__(self, cfg: ModelConfig, ctx: ParallelContext) -> None:
+    def __init__(self, cfg: ModelConfig, ctx: ParallelContext, init_weights: bool = True) -> None:
         super().__init__()
         self.intermediate_local = cfg.intermediate_size // ctx.tp_size
         self.gate_up_proj = FusedGateUpColumnParallelLinear(
-            cfg.hidden_size, self.intermediate_local, ctx, bias=False
+            cfg.hidden_size, self.intermediate_local, ctx, bias=False, init_weights=init_weights
         )
-        self.down_proj = RowParallelLinear(cfg.intermediate_size, cfg.hidden_size, ctx, bias=False)
+        self.down_proj = RowParallelLinear(
+            cfg.intermediate_size, cfg.hidden_size, ctx, bias=False, init_weights=init_weights
+        )
         # ablation toggle: False = v0.1 two-GEMM pattern on the same storage
         self.use_fused_gateup = True
 

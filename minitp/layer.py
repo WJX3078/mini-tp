@@ -19,9 +19,13 @@ class RMSNorm(nn.Module):
     """Applied to the full (replicated) hidden state — after each RowParallel
     AllReduce every rank holds identical hidden, so no communication here."""
 
-    def __init__(self, hidden_size: int, eps: float) -> None:
+    def __init__(self, hidden_size: int, eps: float, init_weights: bool = True) -> None:
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
+        # init_weights=False leaves the buffer uninitialized: the checkpoint
+        # loader owns every value (coverage-audited in tests/test_loader_coverage.py)
+        self.weight = nn.Parameter(
+            torch.ones(hidden_size) if init_weights else torch.empty(hidden_size)
+        )
         self.eps = eps
         # "reference" (7-kernel hand-written) vs "functional" (F.rms_norm,
         # single fused kernel). Default stays reference until the v0.3
@@ -38,12 +42,14 @@ class RMSNorm(nn.Module):
 
 
 class TPQwen2DecoderLayer(nn.Module):
-    def __init__(self, cfg: ModelConfig, ctx: ParallelContext) -> None:
+    def __init__(self, cfg: ModelConfig, ctx: ParallelContext, init_weights: bool = True) -> None:
         super().__init__()
-        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.self_attn = TPQwen2Attention(cfg, ctx)
-        self.mlp = TPQwen2MLP(cfg, ctx)
+        self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, init_weights=init_weights)
+        self.post_attention_layernorm = RMSNorm(
+            cfg.hidden_size, cfg.rms_norm_eps, init_weights=init_weights
+        )
+        self.self_attn = TPQwen2Attention(cfg, ctx, init_weights=init_weights)
+        self.mlp = TPQwen2MLP(cfg, ctx, init_weights=init_weights)
 
     def forward(
         self,
@@ -59,19 +65,25 @@ class TPQwen2DecoderLayer(nn.Module):
 
 
 class TPQwen2ForCausalLM(nn.Module):
-    def __init__(self, cfg: ModelConfig, ctx: ParallelContext) -> None:
+    def __init__(self, cfg: ModelConfig, ctx: ParallelContext, init_weights: bool = True) -> None:
         super().__init__()
         self.cfg = cfg
         self.ctx = ctx
+        self.init_weights = init_weights
         self.rotary: RotaryEmbedding | None = None  # lazily built on first forward
         self.use_rotary_cache = True  # ablation toggle
         self.model = nn.Module()
-        self.model.embed_tokens = VocabParallelEmbedding(cfg.vocab_size, cfg.hidden_size, ctx)
-        self.model.layers = nn.ModuleList(
-            TPQwen2DecoderLayer(cfg, ctx) for _ in range(cfg.num_hidden_layers)
+        self.model.embed_tokens = VocabParallelEmbedding(
+            cfg.vocab_size, cfg.hidden_size, ctx, init_weights=init_weights
         )
-        self.model.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
-        self.lm_head = VocabParallelLMHead(cfg.hidden_size, cfg.vocab_size, ctx)
+        self.model.layers = nn.ModuleList(
+            TPQwen2DecoderLayer(cfg, ctx, init_weights=init_weights)
+            for _ in range(cfg.num_hidden_layers)
+        )
+        self.model.norm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps, init_weights=init_weights)
+        self.lm_head = VocabParallelLMHead(
+            cfg.hidden_size, cfg.vocab_size, ctx, init_weights=init_weights
+        )
         if cfg.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
 

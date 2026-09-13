@@ -33,6 +33,7 @@ class ColumnParallelLinear(nn.Module):
         ctx: ParallelContext,
         bias: bool = True,
         gather_output: bool = False,
+        init_weights: bool = True,
     ) -> None:
         super().__init__()
         if output_size % ctx.tp_size != 0:
@@ -51,7 +52,8 @@ class ColumnParallelLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(self.output_size_local))
         else:
             self.register_parameter("bias", None)
-        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+        if init_weights:
+            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         local = F.linear(x, self.weight, self.bias)
@@ -85,6 +87,7 @@ class RowParallelLinear(nn.Module):
         bias: bool = True,
         input_is_parallel: bool = True,
         reduce_output: bool = True,
+        init_weights: bool = True,
     ) -> None:
         super().__init__()
         if input_size % ctx.tp_size != 0:
@@ -102,7 +105,8 @@ class RowParallelLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(output_size))
         else:
             self.register_parameter("bias", None)
-        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+        if init_weights:
+            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if not self.input_is_parallel:

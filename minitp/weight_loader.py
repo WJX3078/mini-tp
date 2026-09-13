@@ -93,6 +93,12 @@ class SelectiveTensorReader:
             self._weight_map = {}
             self._single_file = os.path.join(model_dir, "model.safetensors")
 
+    def __enter__(self) -> SelectiveTensorReader:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _file_for(self, name: str) -> str:
         if name in self._weight_map:
             return self._weight_map[name]
@@ -106,6 +112,9 @@ class SelectiveTensorReader:
         return self._handles[path]
 
     def names(self) -> list[str]:
+        # single-file layout: real keys from the file header, not an empty map
+        if self._single_file is not None:
+            return list(self._handle(self._single_file).keys())
         return list(self._weight_map)
 
     def has(self, name: str) -> bool:
@@ -133,6 +142,8 @@ class SelectiveTensorReader:
         return sl[tuple(index)]
 
     def close(self) -> None:
+        # explicit handle release matters on Windows (open safetensors mmaps
+        # keep file handles alive)
         self._handles.clear()
 
 
@@ -168,20 +179,29 @@ def load_qwen2_tp(
 ) -> TPQwen2ForCausalLM:
     """Build a TP model and load only this rank's shards.
 
-    loader="selective" (default, v0.3): per-slice reads via safe_open; the
-    full state dict is never materialized. loader="legacy": full CPU state
-    dict per rank (v0.1/v0.2 behavior, kept for comparison). Both produce
-    bit-identical local parameters (tests/test_weight_loader.py).
+    loader="selective" (default): per-slice reads via safe_open, CPU staging,
+    then one model transfer to the target device; the full state dict is never
+    materialized. loader="direct_gpu" (v0.4): the model is CONSTRUCTED on the
+    target device with uninitialized parameters and each rank-local slice is
+    copied straight into its GPU parameter — no CPU TP model at all.
+    loader="legacy": full CPU state dict per rank (kept for comparison).
+    All three produce identical local parameters.
+
+    Random initialization is SKIPPED in all paths (v0.4): an inference
+    checkpoint loader owns every parameter value; the coverage audit
+    (tests/test_loader_coverage.py) proves no parameter escapes the load.
     """
-    if loader not in ("selective", "legacy"):
+    if loader not in ("selective", "legacy", "direct_gpu"):
         raise ValueError(f"unknown loader {loader!r}")
     tp = ctx.tp_size
     rank = ctx.tp_rank
-    model = TPQwen2ForCausalLM(cfg, ctx).to(dtype=dtype)
+    target = device if device is not None else ctx.device
+    build_device = target if loader == "direct_gpu" and target.type == "cuda" else torch.device("cpu")
+    model = TPQwen2ForCausalLM(cfg, ctx, init_weights=False).to(dtype=dtype, device=build_device)
     sd = model.state_dict()
 
     def put(name: str, tensor: torch.Tensor) -> None:
-        sd[name].copy_(tensor.to(dtype=dtype))
+        sd[name].copy_(tensor.to(dtype=dtype, device=build_device))
 
     if loader == "legacy":
         state = _load_full_state(model_dir)
@@ -246,7 +266,7 @@ def load_qwen2_tp(
             reader.close()
 
     model.load_state_dict(sd)
-    return model.to(device if device is not None else ctx.device)
+    return model.to(target)
 
 
 def _load_full_state(model_dir: str) -> dict[str, torch.Tensor]:

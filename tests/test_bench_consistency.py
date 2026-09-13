@@ -10,8 +10,6 @@
 - B6 regression: benchmark feature flags reflect the live runtime objects.
 """
 
-import json
-
 import pytest
 import torch
 import torch.distributed as dist
@@ -19,7 +17,7 @@ import torch.distributed as dist
 from minitp.bench.benchmark import _aggregate_max, _feature_flags, bench_one_iter
 from minitp.config import ModelConfig
 from minitp.distributed.context import ParallelContext
-from minitp.generation import GenerationState, generate_greedy
+from minitp.generation import generate_greedy
 from minitp.layer import TPQwen2ForCausalLM
 
 
@@ -92,7 +90,7 @@ def test_aggregation_is_mean_of_stepwise_max_not_max_of_means():
     mean(step max) = 34; max(mean(rank)) = 32.5. The implementation must
     produce the per-step-max statistics."""
     ctx = ParallelContext(0, 0, 1, 0, 1, torch.device("cpu"), None)  # tp=1: passthrough
-    samples = [max(a, b) for a, b in zip([10, 10, 10, 100], [12, 12, 12, 12])]
+    samples = [max(a, b) for a, b in zip([10, 10, 10, 100], [12, 12, 12, 12], strict=True)]
     got = _aggregate_max(ctx, samples)
     assert got == samples  # tp=1 returns samples unchanged
     assert sum(got) / len(got) == pytest.approx(34.0)
@@ -137,7 +135,7 @@ def test_aggregation_tensor_on_ctx_device_contract():
         real_init = dist.is_initialized
         dist.is_initialized = lambda: True
         try:
-            bm._aggregate_max(ctx, [1.0, 2.0])
+            bm._aggregate_max(ctx, [1.0, 2.0])  # noqa: B018 (contract probe)
         finally:
             dist.is_initialized = real_init
     finally:

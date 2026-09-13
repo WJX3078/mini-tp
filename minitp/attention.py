@@ -23,7 +23,7 @@ class TPQwen2Attention(nn.Module):
     """QKV fused ColumnParallel (head sharded, no comm); attention runs on
     local heads only; o_proj is RowParallel followed by a single AllReduce."""
 
-    def __init__(self, cfg: ModelConfig, ctx: ParallelContext) -> None:
+    def __init__(self, cfg: ModelConfig, ctx: ParallelContext, init_weights: bool = True) -> None:
         super().__init__()
         self.cfg = cfg
         self.ctx = ctx
@@ -37,9 +37,11 @@ class TPQwen2Attention(nn.Module):
 
         q_rows, kv_rows = self.q_local, self.kv_local
         self.qkv_proj = FusedQKVColumnParallelLinear(
-            cfg.hidden_size, q_rows, kv_rows, ctx, bias=True
+            cfg.hidden_size, q_rows, kv_rows, ctx, bias=True, init_weights=init_weights
         )
-        self.o_proj = RowParallelLinear(cfg.hidden_size, cfg.hidden_size, ctx, bias=False)
+        self.o_proj = RowParallelLinear(
+            cfg.hidden_size, cfg.hidden_size, ctx, bias=False, init_weights=init_weights
+        )
         # ablation toggle: False reproduces the v0.1 three-GEMM pattern on the
         # SAME packed storage (weight row views), so only the GEMM count differs
         self.use_fused_qkv = True

@@ -31,6 +31,7 @@ class FusedQKVColumnParallelLinear(nn.Module):
         kv_out_local: int,
         ctx: ParallelContext,
         bias: bool = True,
+        init_weights: bool = True,
     ) -> None:
         super().__init__()
         if hidden_size % ctx.tp_size != 0:
@@ -47,7 +48,8 @@ class FusedQKVColumnParallelLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(out_rows))
         else:
             self.register_parameter("bias", None)
-        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+        if init_weights:
+            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
 
     def out_features(self) -> int:
         return self.weight.shape[0]
@@ -79,6 +81,7 @@ class FusedGateUpColumnParallelLinear(nn.Module):
         intermediate_local: int,
         ctx: ParallelContext,
         bias: bool = False,
+        init_weights: bool = True,
     ) -> None:
         super().__init__()
         if intermediate_local * ctx.tp_size == 0 or hidden_size % ctx.tp_size != 0:
@@ -93,7 +96,8 @@ class FusedGateUpColumnParallelLinear(nn.Module):
             self.bias = nn.Parameter(torch.empty(2 * intermediate_local))
         else:
             self.register_parameter("bias", None)
-        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+        if init_weights:
+            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         y = F.linear(x, self.weight, self.bias)

@@ -26,14 +26,19 @@ class VocabParallelEmbedding(nn.Module):
     contribute zeros and an AllReduce restores the full embedding. Uneven
     vocab splits use contiguous ranges (no padding rows needed)."""
 
-    def __init__(self, vocab_size: int, hidden_size: int, ctx: ParallelContext) -> None:
+    def __init__(
+        self, vocab_size: int, hidden_size: int, ctx: ParallelContext, init_weights: bool = True
+    ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.ctx = ctx
         start, end = shard_range(vocab_size, ctx.tp_rank, ctx.tp_size)
         self.vocab_start, self.vocab_end = start, end
-        self.weight = nn.Parameter(torch.zeros(end - start, hidden_size))
+        self.weight = nn.Parameter(
+            torch.zeros(end - start, hidden_size) if init_weights
+            else torch.empty(end - start, hidden_size)
+        )
         self.tp1_fast = True  # ablation toggle
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
@@ -57,6 +62,7 @@ class VocabParallelLMHead(nn.Module):
         vocab_size: int,
         ctx: ParallelContext,
         gather_logits: bool = False,
+        init_weights: bool = True,
     ) -> None:
         super().__init__()
         self.vocab_size = vocab_size
@@ -65,7 +71,10 @@ class VocabParallelLMHead(nn.Module):
         self.gather_logits = gather_logits
         start, end = shard_range(vocab_size, ctx.tp_rank, ctx.tp_size)
         self.vocab_start, self.vocab_end = start, end
-        self.weight = nn.Parameter(torch.zeros(end - start, hidden_size))
+        self.weight = nn.Parameter(
+            torch.zeros(end - start, hidden_size) if init_weights
+            else torch.empty(end - start, hidden_size)
+        )
         # persistent gather buffer for distributed_argmax (reused across tokens)
         self._gather_buf: torch.Tensor | None = None
         self._gather_buf_shape: tuple[int, ...] | None = None
