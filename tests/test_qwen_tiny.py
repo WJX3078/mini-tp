@@ -56,20 +56,25 @@ def _load_tp_model(hf_model, hf_cfg, ctx) -> TPQwen2ForCausalLM:
     sd = model.state_dict()
     hf_sd = hf_model.state_dict()
     tp, rank = ctx.tp_size, ctx.tp_rank
-    from minitp.weight_loader import _shard, _shard_heads
+    from minitp.weight_loader import _shard, pack_gate_up, pack_qkv
 
-    for name, tensor in hf_sd.items():
-        if name not in sd:
-            continue
-        if "k_proj" in name or "v_proj" in name:
-            shard = _shard_heads(tensor, rank, tp, hf_cfg.num_key_value_heads, cfg.head_dim)
-        elif "embed_tokens" in name or "lm_head" in name or "gate_proj" in name or "up_proj" in name or "q_proj" in name:
-            shard = _shard(tensor, 0, rank, tp)
-        elif "o_proj" in name or "down_proj" in name:
-            shard = _shard(tensor, 1, rank, tp)
-        else:
-            shard = tensor
-        sd[name].copy_(shard)
+    for i in range(cfg.num_hidden_layers):
+        attn = f"model.layers.{i}.self_attn."
+        mlp = f"model.layers.{i}.mlp."
+        qkv_w, qkv_b = pack_qkv(hf_sd, attn, rank, tp, cfg)
+        sd[f"{attn}qkv_proj.weight"].copy_(qkv_w)
+        sd[f"{attn}qkv_proj.bias"].copy_(qkv_b)
+        sd[f"{attn}o_proj.weight"].copy_(_shard(hf_sd[f"{attn}o_proj.weight"], 1, rank, tp))
+        sd[f"{mlp}gate_up_proj.weight"].copy_(pack_gate_up(hf_sd, mlp, rank, tp))
+        sd[f"{mlp}down_proj.weight"].copy_(_shard(hf_sd[f"{mlp}down_proj.weight"], 1, rank, tp))
+        sd[f"model.layers.{i}.input_layernorm.weight"].copy_(hf_sd[f"model.layers.{i}.input_layernorm.weight"])
+        sd[f"model.layers.{i}.post_attention_layernorm.weight"].copy_(
+            hf_sd[f"model.layers.{i}.post_attention_layernorm.weight"]
+        )
+    sd["model.embed_tokens.weight"].copy_(_shard(hf_sd["model.embed_tokens.weight"], 0, rank, tp))
+    sd["model.norm.weight"].copy_(hf_sd["model.norm.weight"])
+    if not cfg.tie_word_embeddings and "lm_head.weight" in sd:
+        sd["lm_head.weight"].copy_(_shard(hf_sd["lm_head.weight"], 0, rank, tp))
     model.load_state_dict(sd)
     model.eval()
     return model

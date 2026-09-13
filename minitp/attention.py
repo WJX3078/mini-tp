@@ -1,4 +1,9 @@
-"""Qwen2 attention with GQA tensor parallelism (per-rank local heads)."""
+"""Qwen2 attention with GQA tensor parallelism (per-rank local heads).
+
+v0.2: q/k/v shards are packed into one fused parameter at load time — a
+single GEMM per forward instead of three (FusedQKVColumnParallelLinear).
+The split afterwards is a zero-copy view.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +14,13 @@ import torch.nn.functional as F
 from minitp.config import ModelConfig
 from minitp.distributed.context import ParallelContext
 from minitp.kv_cache import KVCache
-from minitp.parallel.linear import ColumnParallelLinear, RowParallelLinear
+from minitp.parallel.fused import FusedQKVColumnParallelLinear
+from minitp.parallel.linear import RowParallelLinear
 from minitp.rope import RotaryEmbedding, apply_rope
 
 
 class TPQwen2Attention(nn.Module):
-    """QKV are ColumnParallel (output/head sharded, no comm); attention runs on
+    """QKV fused ColumnParallel (head sharded, no comm); attention runs on
     local heads only; o_proj is RowParallel followed by a single AllReduce."""
 
     def __init__(self, cfg: ModelConfig, ctx: ParallelContext) -> None:
@@ -29,12 +35,9 @@ class TPQwen2Attention(nn.Module):
         self.q_local = self.q_heads_local * self.head_dim
         self.kv_local = self.kv_heads_local * self.head_dim
 
-        self.q_proj = ColumnParallelLinear(cfg.hidden_size, cfg.hidden_size, ctx, bias=True)
-        self.k_proj = ColumnParallelLinear(
-            cfg.hidden_size, cfg.num_key_value_heads * self.head_dim, ctx, bias=True
-        )
-        self.v_proj = ColumnParallelLinear(
-            cfg.hidden_size, cfg.num_key_value_heads * self.head_dim, ctx, bias=True
+        q_rows, kv_rows = self.q_local, self.kv_local
+        self.qkv_proj = FusedQKVColumnParallelLinear(
+            cfg.hidden_size, q_rows, kv_rows, ctx, bias=True
         )
         self.o_proj = RowParallelLinear(cfg.hidden_size, cfg.hidden_size, ctx, bias=False)
 
@@ -47,9 +50,10 @@ class TPQwen2Attention(nn.Module):
         rotary: RotaryEmbedding | None = None,
     ) -> torch.Tensor:
         b, t, _ = x.shape
-        q = self.q_proj(x).view(b, t, self.q_heads_local, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
+        qkv = self.qkv_proj(x)
+        q = qkv[0].view(b, t, self.q_heads_local, self.head_dim).transpose(1, 2)
+        k = qkv[1].view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
+        v = qkv[2].view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
 
         if rotary is not None:
             q, k = rotary.apply(q, k, positions)
@@ -72,8 +76,13 @@ class TPQwen2Attention(nn.Module):
                     f"local q heads {self.q_heads_local} not divisible by local kv heads "
                     f"{self.kv_heads_local}"
                 )
-            k = k.repeat_interleave(group, dim=1)
-            v = v.repeat_interleave(group, dim=1)
+            if self.kv_heads_local == 1:
+                # single local KV head broadcast to all local Q heads: zero-copy
+                k = k.expand(b, self.q_heads_local, k.shape[2], self.head_dim)
+                v = v.expand(b, self.q_heads_local, v.shape[2], self.head_dim)
+            else:
+                k = k.repeat_interleave(group, dim=1)
+                v = v.repeat_interleave(group, dim=1)
 
         if t == 1:
             out = F.scaled_dot_product_attention(q, k, v)
