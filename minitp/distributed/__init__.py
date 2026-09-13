@@ -1,7 +1,9 @@
 """Distributed runtime: process-group context and instrumented collective wrappers."""
 
 from minitp.distributed.collectives import (
+    CommStats,
     all_gather,
+    all_gather_dim0,
     all_reduce,
     broadcast,
     comm_summary,
@@ -14,10 +16,12 @@ from minitp.distributed.collectives import (
 from minitp.distributed.context import ParallelContext, init_context
 
 __all__ = [
+    "CommStats",
     "ParallelContext",
     "init_context",
     "all_reduce",
     "all_gather",
+    "all_gather_dim0",
     "reduce_scatter",
     "broadcast",
     "set_profiling",
