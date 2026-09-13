@@ -4,6 +4,8 @@ from minitp.distributed.collectives import (
     all_gather,
     all_reduce,
     broadcast,
+    comm_summary,
+    drain_comm_stats,
     get_comm_stats,
     reduce_scatter,
     reset_comm_stats,
@@ -20,5 +22,7 @@ __all__ = [
     "broadcast",
     "set_profiling",
     "get_comm_stats",
+    "drain_comm_stats",
+    "comm_summary",
     "reset_comm_stats",
 ]
