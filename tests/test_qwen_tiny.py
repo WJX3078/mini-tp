@@ -187,3 +187,25 @@ def test_tp2_full_model_logits_gloo():
 
     r = run_tp2(_tp2_model_logits)
     assert max(r.values()) < 1e-4, r
+
+
+@requires_hf
+def test_fixed_length_mode_matches_early_stop_prefix():
+    """Fixed-length (no per-token sync) must reproduce early-stop tokens on
+    the prefix before any EOS."""
+    torch.manual_seed(5)
+    hf_cfg = tiny_cfg()
+    hf = Qwen2ForCausalLM(hf_cfg).eval()
+    model = _load_tp_model(hf, hf_cfg, ParallelContext(0, 0, 1, 0, 1, torch.device("cpu"), None))
+    from minitp.generation import generate_greedy
+
+    ids = torch.randint(3, 100, (2, 5))
+    with torch.no_grad():
+        eager = generate_greedy(
+            model, ids, max_new_tokens=8, eos_token_id=None, early_stop=True
+        )
+        fixed = generate_greedy(
+            model, ids, max_new_tokens=8, eos_token_id=None, early_stop=False
+        )
+    assert eager.shape == (2, 13) and fixed.shape == (2, 13)
+    assert torch.equal(eager, fixed)  # no EOS in vocab 3..100 range -> identical
