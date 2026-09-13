@@ -12,6 +12,7 @@ from minitp.distributed.context import ParallelContext
 from minitp.kv_cache import KVCache
 from minitp.mlp import TPQwen2MLP
 from minitp.parallel.embedding import VocabParallelEmbedding, VocabParallelLMHead
+from minitp.profiling import scope
 from minitp.rope import RotaryEmbedding
 
 
@@ -109,13 +110,15 @@ class TPQwen2ForCausalLM(nn.Module):
                 )
             rotary = self.rotary
         for i, layer in enumerate(self.model.layers):
-            x = layer(x, positions, kv_cache, i, rotary)
+            with scope(f"mini_tp.layer_{i}"):
+                x = layer(x, positions, kv_cache, i, rotary)
         if kv_cache is not None:
             kv_cache.advance(t)
-        x = self.model.norm(x)
-        if gather_logits:
-            self.lm_head.gather_logits = True
-            logits = self.lm_head(x)
-            self.lm_head.gather_logits = False
-            return logits
-        return self.lm_head(x)
+        with scope("mini_tp.final_norm_lm_head"):
+            x = self.model.norm(x)
+            if gather_logits:
+                self.lm_head.gather_logits = True
+                logits = self.lm_head(x)
+                self.lm_head.gather_logits = False
+                return logits
+            return self.lm_head(x)

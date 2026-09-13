@@ -25,7 +25,9 @@ import time
 import torch
 import torch.distributed as dist
 
-SIZES = [2**i for i in range(10, 27)]  # 1 KB .. 64 MB
+SIZES = [256, 512, 1024, 1792, 2048, 4096, 8192, 16384, 32768, 65536,
+         131072, 262144, 524288, 1048576, 4194304, 16777216, 67108864]
+# 1792 B is the REAL Qwen decode AllReduce message (B=1, T=1, hidden=896, bf16)
 OPS = ("all_reduce", "all_gather", "reduce_scatter")
 
 
@@ -115,26 +117,37 @@ def main_from_args(args_dict: dict) -> None:
 
             for _ in range(warmup):
                 run()
+            samples = []
             if use_cuda:
-                torch.cuda.synchronize()
-                s, e = torch.cuda.Event(True), torch.cuda.Event(True)
-                s.record()
-                for _ in range(iters):
+                evs = [(torch.cuda.Event(True), torch.cuda.Event(True))
+                       for _ in range(iters)]
+                for s0, e0 in evs:
+                    s0.record()
                     run()
-                e.record()
+                    e0.record()
                 torch.cuda.synchronize()
-                ms = s.elapsed_time(e) / iters
+                samples = [s0.elapsed_time(e0) for s0, e0 in evs]
             else:
-                t0 = time.perf_counter()
                 for _ in range(iters):
+                    t0 = time.perf_counter()
                     run()
-                ms = (time.perf_counter() - t0) / iters * 1e3
+                    samples.append((time.perf_counter() - t0) * 1e3)
+            xs = sorted(samples)
+            n_i = len(xs)
+
+            def pct(q):
+                return round(xs[max(0, min(n_i - 1, round(q * n_i) - 1))] * 1e3, 1)
+
+            ms = sum(xs) / n_i
             if rank == 0:
                 algbw = payload / (ms / 1e3) / 2**30  # GB/s
                 rows.append({
                     "op": op,
                     "payload_bytes": payload,
-                    "latency_us": round(ms * 1e3, 1),
+                    "latency_us_mean": round(ms * 1e3, 1),
+                    "latency_us_p50": pct(0.50),
+                    "latency_us_p90": pct(0.90),
+                    "latency_us_p99": pct(0.99),
                     "algbw_GBps": round(algbw, 2),
                     "busbw_GBps": round(algbw * _busbw_factor(op, world), 2),
                 })

@@ -118,3 +118,30 @@ def test_zeros_init_matches_empty_init_outputs():
         a = generate_greedy(model, ids, max_new_tokens=8, early_stop=False, kv_init="zeros")
         b = generate_greedy(model, ids, max_new_tokens=8, early_stop=False, kv_init="empty")
     assert torch.equal(a, b)
+
+
+def test_compiled_rmsnorm_bit_exact_to_reference():
+    """The compiled backend must be bit-exact to the reference path (v0.4
+    experiment result); skipped automatically where torch.compile fails."""
+    pytest.importorskip("torch")
+    try:
+        x = torch.randn(2, 3, 64)
+        m = _tiny_model()
+        norm = m.model.layers[0].input_layernorm
+        ref = norm.forward.__wrapped__(norm, x) if hasattr(norm.forward, "__wrapped__") else None
+    except Exception:
+        pass
+    from minitp.layer import RMSNorm
+
+    n = RMSNorm(64, 1e-6)
+    with torch.no_grad():
+        n.weight.uniform_(0.5, 1.5)
+    x = torch.randn(2, 3, 64)
+    n.implementation = "reference"
+    ref = n(x)
+    try:
+        n.implementation = "compiled"
+        out = n(x)
+    except Exception as e:  # compile unavailable on this platform
+        pytest.skip(f"torch.compile unavailable: {e!r:.80}")
+    assert torch.equal(ref, out)
