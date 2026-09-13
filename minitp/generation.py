@@ -1,23 +1,23 @@
 """Greedy autoregressive generation over the per-rank KV cache.
 
-v0.2 hot-path rules (see docs/PERFORMANCE_AUDIT.md):
+v0.4: ``GenerationState`` is the SINGLE decode hot path — ``generate_greedy``,
+the benchmark, and the ablation all drive the same object, so the measured
+path is the shipped path (v0.3's benchmark re-implemented the loop and quietly
+re-built ``torch.arange`` positions every token: 10 aranges per benchmark
+iteration vs 2 on the generation path, docs/V04_AUDIT.md B3).
 
-- Output ids are written into one preallocated ``[B, prompt+max_new]`` buffer —
-  no per-token ``torch.cat`` (which was O(T^2) copies over a generation).
-- Positions come from one precomputed arange, sliced per step (a view).
-- ``early_stop=True``  — interactive mode: stops at EOS; costs one GPU→CPU
-  sync per token (``bool(finished.all())``).
-- ``early_stop=False`` — fixed-length benchmark mode: runs exactly
-  ``max_new_tokens`` steps with **zero GPU→CPU synchronizations** (no
-  ``.item()``/``bool()``); tokens after EOS are still written and must be
-  ignored/trimmed by the caller.
+Rules carried over from v0.2/v0.3:
 
-``prefill``/``decode_step`` are exposed separately so benchmarks can time the
-two phases (and each decode token) without re-implementing the loop.
+- Output ids go into one preallocated ``[B, prompt+max_new]`` buffer; positions
+  come from one precomputed arange sliced per step (a view).
+- ``early_stop=True``  — interactive: stops at EOS; one GPU→CPU sync per token.
+- ``early_stop=False`` — benchmark: exactly ``max_new_tokens`` steps, zero
+  GPU→CPU synchronizations; tokens after EOS are written but must be ignored
+  by the caller.
 
-All entry points run under ``torch.inference_mode`` (measured ~8 % faster than
-``no_grad`` on the v0.3 ablation harness, docs/V03_REPORT.md); inference
-tensors are returned, which is safe for greedy decoding.
+All entry points run under ``torch.inference_mode`` (measured faster on the
+v0.3 ablation harness); inference tensors are returned, which is safe for
+greedy decoding.
 """
 
 from __future__ import annotations
@@ -33,7 +33,12 @@ def _kv_heads_local(model: TPQwen2ForCausalLM) -> int:
     return model.model.layers[0].self_attn.kv_heads_local
 
 
-def make_kv_cache(model: TPQwen2ForCausalLM, batch_size: int, max_seq_len: int) -> KVCache:
+def make_kv_cache(
+    model: TPQwen2ForCausalLM,
+    batch_size: int,
+    max_seq_len: int,
+    init: str = "empty",
+) -> KVCache:
     return KVCache(
         num_layers=model.cfg.num_hidden_layers,
         batch_size=batch_size,
@@ -42,36 +47,12 @@ def make_kv_cache(model: TPQwen2ForCausalLM, batch_size: int, max_seq_len: int) 
         max_seq_len=max_seq_len,
         dtype=next(model.parameters()).dtype,
         device=next(model.parameters()).device,
+        init=init,
     )
 
 
-@torch.inference_mode()
-def prefill(
-    model: TPQwen2ForCausalLM,
-    input_ids: torch.Tensor,  # [B, T] identical on every rank
-    kv: KVCache | None = None,
-) -> tuple[torch.Tensor, KVCache]:
-    """Prompt forward. Returns (local logits [B, T, vocab_local], kv cache)."""
-    if kv is None:
-        kv = make_kv_cache(model, input_ids.shape[0], input_ids.shape[1])
-    positions = torch.arange(input_ids.shape[1], device=input_ids.device)
-    logits = model(input_ids, positions=positions, kv_cache=kv)
-    return logits, kv
-
-
-@torch.inference_mode()
-def decode_step(
-    model: TPQwen2ForCausalLM,
-    token: torch.Tensor,  # [B, 1]
-    kv: KVCache,
-    position: torch.Tensor | None = None,  # [1] absolute position of the new token
-) -> torch.Tensor:
-    """One autoregressive step. Returns local logits [B, 1, vocab_local]."""
-    return model(token, positions=position, kv_cache=kv)
-
-
 def select_token(
-    model: TPQwen2ForCausalLM, logits: torch.Tensor, distributed_argmax: bool
+    model: TPQwen2ForCausalLM, logits: torch.Tensor, distributed_argmax: bool = True
 ) -> torch.Tensor:
     """Greedy pick from local logits; identical result on every rank."""
     if distributed_argmax:
@@ -86,6 +67,69 @@ def select_token(
     return full.argmax(dim=-1)
 
 
+class GenerationState:
+    """The one decode hot path: KV cache + positions buffer + output buffer.
+
+    Usage::
+
+        state = GenerationState(model, input_ids, max_new_tokens)
+        logits = state.prefill()                 # prompt forward
+        tok = state.select_next(logits)          # first token (TTFT end)
+        pos = state.append(tok)
+        logits = state.decode_step(tok, pos)     # subsequent steps
+        tok = state.select_next(logits)
+        ...
+        state.out_ids  # [B, prompt + written tokens]
+
+    Positions come exclusively from the precomputed buffer — no per-step
+    ``torch.arange`` anywhere after construction.
+    """
+
+    def __init__(
+        self,
+        model: TPQwen2ForCausalLM,
+        input_ids: torch.Tensor,  # [B, T] identical on every rank
+        max_new_tokens: int,
+        kv: KVCache | None = None,
+        distributed_argmax: bool = True,
+        kv_init: str = "empty",
+    ) -> None:
+        self.model = model
+        self.distributed_argmax = distributed_argmax
+        b, t = input_ids.shape
+        self.prompt_len = t
+        self.max_new_tokens = max_new_tokens
+        self.total = t + max_new_tokens
+        self.kv = kv if kv is not None else make_kv_cache(model, b, self.total, init=kv_init)
+        device = input_ids.device
+        self.out_ids = torch.empty(b, self.total, dtype=torch.long, device=device)
+        self.out_ids[:, :t] = input_ids
+        self.positions_buf = torch.arange(self.total, device=device)
+        self.cursor = t  # tokens written into out_ids so far
+        self.finished: torch.Tensor | None = None
+        self.eos = -1
+
+    def prefill(self) -> torch.Tensor:
+        """Prompt forward; positions come from the buffer (0..T-1)."""
+        positions = self.positions_buf[: self.prompt_len]
+        return self.model(
+            self.out_ids[:, : self.prompt_len], positions=positions, kv_cache=self.kv
+        )
+
+    def select_next(self, logits: torch.Tensor) -> torch.Tensor:
+        return select_token(self.model, logits, self.distributed_argmax)
+
+    def append(self, tok: torch.Tensor) -> torch.Tensor:
+        """Write token at the cursor; returns its absolute position tensor."""
+        self.out_ids[:, self.cursor] = tok
+        pos = self.positions_buf[self.cursor]
+        self.cursor += 1
+        return pos
+
+    def decode_step(self, tok: torch.Tensor, pos: torch.Tensor) -> torch.Tensor:
+        return self.model(tok.unsqueeze(-1), positions=pos.unsqueeze(-1), kv_cache=self.kv)
+
+
 @torch.inference_mode()
 def generate_greedy(
     model: TPQwen2ForCausalLM,
@@ -95,37 +139,33 @@ def generate_greedy(
     distributed_argmax: bool = True,
     early_stop: bool = True,
     kv: KVCache | None = None,
+    kv_init: str = "empty",
 ) -> torch.Tensor:
-    """Greedy decode into a preallocated buffer.
+    """Greedy decode through ``GenerationState``.
 
     Returns [B, prompt + generated]: trimmed at the first step where all rows
     are EOS-finished when ``early_stop=True``; exactly prompt+max_new_tokens
     columns when ``early_stop=False``.
     """
-    b, t = input_ids.shape
-    if kv is None:
-        kv = make_kv_cache(model, b, t + max_new_tokens)
-    total = t + max_new_tokens
-    out_ids = torch.empty(b, total, dtype=torch.long, device=input_ids.device)
-    out_ids[:, :t] = input_ids
-    positions_buf = torch.arange(total, device=input_ids.device)
+    state = GenerationState(
+        model, input_ids, max_new_tokens, kv=kv,
+        distributed_argmax=distributed_argmax, kv_init=kv_init,
+    )
+    b = input_ids.shape[0]
+    if early_stop and eos_token_id is not None:
+        state.eos = eos_token_id
+        state.finished = torch.zeros(b, dtype=torch.bool, device=input_ids.device)
 
-    logits, kv = prefill(model, input_ids, kv)
-    cursor = t
-    eos = torch.tensor(eos_token_id if eos_token_id is not None else -1, device=input_ids.device)
-    finished = torch.zeros(b, dtype=torch.bool, device=input_ids.device) if early_stop else None
-
+    logits = state.prefill()
+    eos_tok = torch.tensor(state.eos, device=input_ids.device)
     for step in range(max_new_tokens):
-        next_tok = select_token(model, logits, distributed_argmax)
-        if early_stop and eos_token_id is not None:
-            next_tok = torch.where(finished, eos, next_tok)
-            finished = finished | (next_tok == eos)
-        out_ids[:, cursor] = next_tok
-        cursor += 1
-        if early_stop and eos_token_id is not None and bool(finished.all()):
+        tok = state.select_next(logits)
+        if state.finished is not None:
+            tok = torch.where(state.finished, eos_tok, tok)
+            state.finished = state.finished | (tok == state.eos)
+        pos = state.append(tok)
+        if state.finished is not None and bool(state.finished.all()):
             break
         if step + 1 < max_new_tokens:
-            logits = decode_step(
-                model, next_tok.unsqueeze(-1), kv, positions_buf[cursor - 1 : cursor]
-            )
-    return out_ids[:, :cursor] if early_stop else out_ids
+            logits = state.decode_step(tok, pos)
+    return state.out_ids[:, : state.cursor] if early_stop else state.out_ids

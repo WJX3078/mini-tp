@@ -186,3 +186,74 @@ def test_tp2_uneven_gather_logits_gloo():
 
     r = run_tp2(_tp2_uneven_gather_logits)
     assert max(r.values()) < 1e-5, r
+
+
+def _tp2_sim_ctx():
+    """TP=2 context without a process group: usable ONLY for paths that fail
+    before any collective (e.g. the fp32 vocab guard)."""
+    return ParallelContext(0, 0, 2, 0, 2, torch.device("cpu"), None)
+
+
+@pytest.mark.parametrize("enc", ["bitpack", "fp64", "split"])
+def test_argmax_encodings_precision_guard(enc):
+    """The legacy fp32 encoding must refuse loudly for vocab > 2^24; the
+    precision-safe encodings must not (guard fires before any collective)."""
+    import pytest as _pytest
+
+    head = VocabParallelLMHead(4, 21_000_000, _tp2_sim_ctx())
+    logits = torch.full((1, 21_000_000), -1e30)
+    logits[0, 16_777_217] = 3.5
+    if enc == "fp32":
+        with _pytest.raises(ValueError, match="2\*\*24"):
+            head.distributed_argmax(logits, encoding=enc)
+    else:
+        head.distributed_argmax(logits, encoding=enc)  # no raise
+
+
+def _tp2_encoding_worker(rank, tp):
+    """Real 2-rank Gloo run: ids > 2^24 (odd), cross-rank ties, negatives, NaN."""
+    torch.manual_seed(42)
+    vocab = 21_000_000
+    hidden = 4
+    ctx = _pg_ctx(rank, tp)
+    head = VocabParallelLMHead(hidden, vocab, ctx)
+    s, e = shard_range(vocab, rank, tp)
+    errs = 0
+    cases = []
+    base = torch.full((1, vocab), -1e30)
+    for vid in (12095, 16_777_216, 16_777_217, 20_000_001, 20_979_201):
+        c = base.clone()
+        c[0, vid] = 3.5
+        cases.append(c)
+    tie = base.clone()
+    tie[0, 5] = 7.0
+    tie[0, vocab - 5] = 7.0
+    cases.append(tie)
+    neg = torch.full((1, vocab), -50.0)
+    neg[0, vocab - 2] = -0.25
+    cases.append(neg)
+    nan_case = base.clone()
+    nan_case[0, 6] = 9.0
+    nan_case[0, 100] = float("nan")
+    cases.append(nan_case)
+
+    case_names = [f"id{c[0, :].nonzero()[0].item() if (c != -1e30).any() else '?'}" for c in cases]
+    for case, name in zip(cases, case_names):
+        want = case.argmax(dim=-1)
+        if bool(torch.isnan(case).any()):
+            want = torch.tensor([6])  # NaN-carrying rank loses per policy (all ranks)
+        got = head.distributed_argmax(case[..., s:e], encoding="bitpack")
+        if int((got != want).sum().item()):
+            print(rank, "FAIL case", name, "got", got.item(), "want", want.item(), flush=True)
+        errs += int((got != want).sum().item())
+    return errs
+
+
+@pytest.mark.distributed
+def test_tp2_argmax_encodings_gloo():
+    if os.environ.get("SKIP_DISTRIBUTED_TESTS"):
+        pytest.skip("distributed tests disabled")
+    from tests.distributed.harness import run_tp2
+
+    r = run_tp2(_tp2_encoding_worker)
+    assert max(r.values()) == 0, r

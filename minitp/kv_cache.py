@@ -8,7 +8,11 @@ import torch
 class KVCache:
     """One k/v buffer per layer, layout [batch, kv_heads_local, max_seq_len, head_dim].
 
-    `seq_len` is the fill cursor; slices [:, :, :seq_len] are valid.
+    ``seq_len`` is the fill cursor; only ``[:, :, :seq_len]`` is ever read —
+    the write-before-read invariant that makes ``init="empty"`` safe
+    (NaN-poison tested in tests/test_kv_cache.py, K and V separately).
+
+    ``init``: "empty" (default, skips the zero-fill kernels) or "zeros".
     """
 
     def __init__(
@@ -20,21 +24,25 @@ class KVCache:
         max_seq_len: int,
         dtype: torch.dtype,
         device: torch.device,
+        init: str = "empty",
     ) -> None:
+        if init not in ("empty", "zeros"):
+            raise ValueError(f"init must be 'empty' or 'zeros', got {init!r}")
         self.max_seq_len = max_seq_len
         self.seq_len = 0
-        # torch.empty, not zeros: attention only ever reads [:seq_len], which is
-        # written before read (fill-cursor invariant, poison-tested in
-        # tests/test_kv_cache.py) — avoids the zero-fill kernel for large caches
+        alloc = torch.empty if init == "empty" else torch.zeros
         self.k = [
-            torch.empty(batch_size, kv_heads_local, max_seq_len, head_dim, dtype=dtype, device=device)
+            alloc(batch_size, kv_heads_local, max_seq_len, head_dim, dtype=dtype, device=device)
             for _ in range(num_layers)
         ]
         self.v = [
-            torch.zeros_like(kb) for kb in self.k
+            alloc(batch_size, kv_heads_local, max_seq_len, head_dim, dtype=dtype, device=device)
+            for _ in range(num_layers)
         ]
 
-    def update(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def update(
+        self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Append [B, H, T, D] at the cursor; returns the full valid view."""
         t = k_new.shape[2]
         end = self.seq_len + t
@@ -48,3 +56,8 @@ class KVCache:
 
     def advance(self, tokens: int) -> None:
         self.seq_len += tokens
+
+    def poison(self, value: float = float("nan")) -> None:
+        """Test helper: fill every slot (written or not) with a sentinel."""
+        for buf in (*self.k, *self.v):
+            buf.fill_(value)

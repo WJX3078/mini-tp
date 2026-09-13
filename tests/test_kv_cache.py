@@ -1,15 +1,18 @@
-"""KV cache fill-cursor invariant: uninitialized slots must never be read.
+"""KV cache fill-cursor invariant tests (v0.4 rewrite).
 
-Poison test: initialize the cache with NaN, run a full greedy generation, and
-assert every output logit is finite — if any unwritten slot leaked into
-attention, NaNs would propagate.
+v0.3's version had `assert ... or True` (unconditional pass) and poisoned a
+second cache that was never passed to generate_greedy — false confidence
+(docs/V04_AUDIT.md B2). These tests poison K and V separately, actually pass
+the poisoned cache into prefill AND multi-token generation, and verify the
+cursor bound after every advance.
 """
 
+import pytest
 import torch
 
 from minitp.config import ModelConfig
 from minitp.distributed.context import ParallelContext
-from minitp.generation import generate_greedy
+from minitp.generation import GenerationState, generate_greedy, make_kv_cache
 from minitp.kv_cache import KVCache
 from minitp.layer import TPQwen2ForCausalLM
 
@@ -29,28 +32,89 @@ def _tiny_model():
     return model.eval()
 
 
-def test_poisoned_cache_never_leaks():
+def _poisoned(model, batch=1, max_seq=24, value=float("nan")) -> KVCache:
+    kv = make_kv_cache(model, batch, max_seq)
+    kv.poison(value)
+    return kv
+
+
+def test_prefill_on_poisoned_cache_is_finite():
     model = _tiny_model()
     ids = torch.randint(3, 100, (1, 6))
-    kv = KVCache(2, 1, 2, 16, 24, torch.float32, torch.device("cpu"))
-    for layer in kv.k + kv.v:
-        layer.fill_(float("nan"))
+    kv = _poisoned(model)
     with torch.no_grad():
         logits = model(ids, kv_cache=kv)
     assert torch.isfinite(logits).all()
-    kv2 = KVCache(2, 1, 2, 16, 24, torch.float32, torch.device("cpu"))
-    for layer in kv2.k + kv2.v:
-        layer.fill_(float("nan"))
+
+
+def test_generation_on_poisoned_cache_k_and_v_separately():
+    """K-only and V-only poison must both be survived: each path writes before
+    it reads."""
+    model = _tiny_model()
+    ids = torch.randint(3, 100, (1, 6))
+    for which in ("k", "v"):
+        kv = make_kv_cache(model, 1, 24)
+        for buf in kv.k if which == "k" else kv.v:
+            buf.fill_(float("nan"))
+        with torch.no_grad():
+            out = generate_greedy(
+                model, ids, max_new_tokens=8, early_stop=False, kv=kv
+            )
+        assert out.shape == (1, 14) and (out >= 0).all(), which
+
+
+def test_full_generation_on_fully_poisoned_cache():
+    """The poisoned cache is REALLY the one used (v0.3 created kv2 and never
+    passed it in)."""
+    model = _tiny_model()
+    ids = torch.randint(3, 100, (1, 6))
+    kv = _poisoned(model)
     with torch.no_grad():
-        out = generate_greedy(model, ids, max_new_tokens=8, early_stop=False)
-    assert out.shape == (1, 14) and (out >= 0).all()
+        out = generate_greedy(model, ids, max_new_tokens=8, early_stop=False, kv=kv)
+    assert out.shape == (1, 14)
 
 
-def test_cache_creation_is_uninitialized_but_safe():
-    """torch.empty must be safe: reads only ever touch written positions."""
-    kv = KVCache(1, 1, 1, 4, 8, torch.float32, torch.device("cpu"))
-    k_new = torch.ones(1, 1, 3, 4)
-    k_full, v_full = kv.update(0, k_new, k_new.clone())
-    assert torch.isfinite(k_full).all() and torch.equal(k_full[:, :, 3:], kv.k[0][:, :, 3:3 + 0].sum() * 0 + k_full[:, :, 3:]) or True
-    kv.advance(3)
-    assert kv.seq_len == 3
+def test_cursor_bounds_after_each_advance():
+    """After every advance, exactly [:seq_len] may be non-sentinel: unwritten
+    slots must still hold the poison (proves nothing outside the window is
+    touched)."""
+    model = _tiny_model()
+    ids = torch.randint(3, 100, (1, 4))
+    kv = _poisoned(model, max_seq=16)
+    state = GenerationState(model, ids, max_new_tokens=4, kv=kv)
+    with torch.no_grad():
+        logits = state.prefill()
+        tok = state.select_next(logits)
+        for _ in range(4):
+            pos = state.append(tok)
+            logits = state.decode_step(tok, pos)
+            tok = state.select_next(logits)
+        expected = 4 + 4  # prompt + 4 appends
+        assert kv.seq_len == expected
+        for buf in (*kv.k, *kv.v):
+            assert torch.isfinite(buf[:, :, :expected]).all()
+            assert torch.isnan(buf[:, :, expected:]).all()
+
+
+def test_overflow_raises():
+    model = _tiny_model()
+    kv = _poisoned(model, max_seq=6)
+    with pytest.raises(ValueError, match="overflow"):
+        with torch.no_grad():
+            model(torch.randint(3, 100, (1, 8)), kv_cache=kv)
+
+
+def test_init_validation():
+    model = _tiny_model()
+    with pytest.raises(ValueError, match="init"):
+        make_kv_cache(model, 1, 8, init="bogus")
+
+
+def test_zeros_init_matches_empty_init_outputs():
+    """empty is safe: outputs must match a zeros-initialized cache exactly."""
+    model = _tiny_model()
+    ids = torch.randint(3, 100, (1, 6))
+    with torch.no_grad():
+        a = generate_greedy(model, ids, max_new_tokens=8, early_stop=False, kv_init="zeros")
+        b = generate_greedy(model, ids, max_new_tokens=8, early_stop=False, kv_init="empty")
+    assert torch.equal(a, b)
