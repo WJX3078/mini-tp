@@ -66,7 +66,7 @@ def decode_step(
     return model(token, positions=position, kv_cache=kv)
 
 
-def _select_token(
+def select_token(
     model: TPQwen2ForCausalLM, logits: torch.Tensor, distributed_argmax: bool
 ) -> torch.Tensor:
     """Greedy pick from local logits; identical result on every rank."""
@@ -112,7 +112,7 @@ def generate_greedy(
     finished = torch.zeros(b, dtype=torch.bool, device=input_ids.device) if early_stop else None
 
     for step in range(max_new_tokens):
-        next_tok = _select_token(model, logits, distributed_argmax)
+        next_tok = select_token(model, logits, distributed_argmax)
         if early_stop and eos_token_id is not None:
             next_tok = torch.where(finished, eos, next_tok)
             finished = finished | (next_tok == eos)

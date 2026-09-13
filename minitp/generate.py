@@ -103,14 +103,21 @@ def main(argv=None) -> None:
         print(f"output:        {text!r}")
         if args.profile:
             stats = get_comm_stats()
-            total_bytes = sum(s["bytes"] for s in stats)
-            total_ms = sum(s["elapsed_ms"] for s in stats)
-            calls = {}
+            by_op = {}
             for s in stats:
-                calls[s["op"]] = calls.get(s["op"], 0) + 1
+                agg = by_op.setdefault(s["op"], {"calls": 0, "bytes": 0, "host_launch_ms": 0.0})
+                agg["calls"] += 1
+                agg["bytes"] += s["bytes"]
+                agg["host_launch_ms"] += s["host_launch_ms"]
+                if s["gpu_elapsed_ms"] is not None:
+                    agg["gpu_elapsed_ms"] = agg.get("gpu_elapsed_ms", 0.0) + s["gpu_elapsed_ms"]
             print("communication:", json.dumps({
-                "calls": calls, "total_bytes": total_bytes, "total_ms": round(total_ms, 2),
-                "runtime_ms": round(elapsed * 1e3, 2),
+                "calls": len(stats),
+                "total_bytes": sum(s["bytes"] for s in stats),
+                "host_launch_ms": round(sum(s["host_launch_ms"] for s in stats), 2),
+                "gpu_elapsed_ms": round(sum(
+                    s["gpu_elapsed_ms"] for s in stats if s["gpu_elapsed_ms"] is not None), 2),
+                "runtime_ms": round(elapsed * 1e3, 2), "by_op": by_op,
             }))
 
     ctx.barrier()

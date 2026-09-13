@@ -66,25 +66,57 @@ The bf16 greedy comparison against HF CUDA is intentionally not asserted: HF's o
 bf16 CUDA greedy output is unstable (repetition loops); in fp32 both models agree
 token-for-token, and the TP=1 CPU bf16 run also agrees with HF CPU.
 
+## Performance engineering (v0.2)
+
+v0.2 is a measurement-driven optimization pass over the v0.1 runtime
+([docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)): profiling showed decode
+was **kernel-launch-bound** (~6,565 CUDA kernels per token, GEMMs only ~15 % of
+GPU time), so the optimizations target launch count and host overhead — with
+correctness gates on every change (logits + fp32 greedy token equality vs HF):
+
+- **Fused QKV / fused gate+up** — per-rank shards packed into one GEMM at load
+  time (7 → 4 GEMMs per layer per token; split is a zero-copy view)
+- **RoPE cache** — cos/sin tables precomputed once (fp32) instead of rebuilt in
+  all 24 layers on every forward
+- **Allocation-free decode loop** — preallocated output buffer + positions,
+  and a fixed-length benchmark mode with **zero GPU→CPU syncs per token**
+  (early-stop EOS checking remains opt-in for interactive use)
+- **Correct async communication profiler** — paired CUDA events split
+  `host_launch_ms` vs `gpu_elapsed_ms` ([docs/COMMUNICATION_PROFILING.md](docs/COMMUNICATION_PROFILING.md))
+- **Phase-separated benchmark** ([docs/BENCHMARK.md](docs/BENCHMARK.md)) —
+  prefill / per-token decode p50-p99 / e2e / load measured independently
+
+Microbenchmarks (this GPU, bf16, old vs new per hot-path op):
+
+| op | old | new | speedup |
+|---|---|---|---|
+| RoPE apply (per layer) | 0.581 ms | 0.393 ms | 1.5× |
+| QKV projection (per layer) | 0.116 ms | 0.051 ms | 2.3× |
+| gate+up projection (per layer) | 0.062 ms | 0.052 ms | 1.2× |
+| decode bookkeeping (per 256 tok, incl. v0.1's per-token sync) | 21.5 ms | 11.9 ms | 1.8× |
+
 ## Benchmark
 
-**Environment for the numbers below: 1× consumer GPU (single-GPU laptop), PyTorch 2.6,
-bf16, batch 1.** TP=2 numbers: `UNVERIFIED — requires >=2 CUDA GPUs`; run
-`scripts/run_multi_gpu_bench.sh` on a multi-GPU host to fill them in.
+**Measured on 1× consumer GPU (laptop, Windows, PyTorch 2.6, bf16, batch 1),
+schema `minitp.bench/2` — decode timed per token, fixed-length, sync-free.**
+TP=2/TP=4 numbers: `UNVERIFIED — requires >=2 CUDA GPUs`; run
+`scripts/run_multi_gpu_bench.sh` on a multi-GPU host to produce them.
 
-| Workload (prompt+gen) | TP | E2E (s) | ms/token | tok/s (output) | Peak mem/GPU (GiB) |
+| Workload (prompt+gen) | TP | prefill tok/s | decode ms/token (mean) | decode tok/s | Peak mem/GPU (GiB) |
 |---|---|---|---|---|---|
-| 128 + 32 | 1 | 2.46 | 76.8 | 13.0 | 0.98 |
-| 512 + 128 | 1 | 7.88 | 61.6 | 16.2 | 1.09 |
-| 2048 + 32 | 1 | 2.19 | 68.6 | 14.6 | 1.55 |
+| 128 + 32 | 1 | 2,196 | 55.7 | 17.9 | 0.99 |
+| 512 + 128 | 1 | 7,830 | 55.7 | 17.9 | 1.10 |
+| 2048 + 32 | 1 | 18,147 | 55.1 | 18.2 | 1.55 |
 
-Memory model: weights ≈ 0.5B × 2 bytes / TP = **0.93 GiB at TP=1, 0.47 GiB at TP=2**
-(per rank). Measured 0.98 GiB at TP=1 — the ~0.05 GiB delta is activations, KV cache,
-norm weights, and allocator overhead. Communication profile: TP=1 does zero
-collectives; at TP=2 the runtime does 2 AllReduces × 24 layers × `B·T·896·2` bytes
-per forward, which on PCIe-attached GPUs typically makes TP=2 **slower** than TP=1
-for a 0.5B model — the theoretical communication model and profiler exist to
-quantify exactly this trade-off.
+Decode improved from **~76.8 ms/token (v0.1, e2e-derived) to ~55.7 ms/token
+(v0.2, phase-measured)** — ~28 % faster; microbenchmarks attribute ≈6–7 ms to
+the three fused/cached ops and removed per-token sync, the remainder to reduced
+allocator churn and host dispatch. Memory model: weights ≈ 0.5B × 2 bytes / TP
+= **0.93 GiB at TP=1, 0.47 GiB at TP=2** per rank; measured peaks include
+activations, KV cache, and allocator overhead. At TP=2 the runtime does
+2 AllReduces × 24 layers × `B·T·896·2` bytes per forward, which on PCIe
+typically makes TP=2 slower than TP=1 for a 0.5B model — the profiler and
+theoretical model exist to quantify exactly this trade-off.
 
 ## Usage
 
