@@ -204,7 +204,7 @@ def test_argmax_encodings_precision_guard(enc):
     logits = torch.full((1, 21_000_000), -1e30)
     logits[0, 16_777_217] = 3.5
     if enc == "fp32":
-        with _pytest.raises(ValueError, match="2\*\*24"):
+        with _pytest.raises(ValueError, match=r"2\*\*24"):
             head.distributed_argmax(logits, encoding=enc)
     else:
         head.distributed_argmax(logits, encoding=enc)  # no raise
@@ -237,14 +237,11 @@ def _tp2_encoding_worker(rank, tp):
     nan_case[0, 100] = float("nan")
     cases.append(nan_case)
 
-    case_names = [f"id{c[0, :].nonzero()[0].item() if (c != -1e30).any() else '?'}" for c in cases]
-    for case, name in zip(cases, case_names):
+    for case in cases:
         want = case.argmax(dim=-1)
         if bool(torch.isnan(case).any()):
             want = torch.tensor([6])  # NaN-carrying rank loses per policy (all ranks)
         got = head.distributed_argmax(case[..., s:e], encoding="bitpack")
-        if int((got != want).sum().item()):
-            print(rank, "FAIL case", name, "got", got.item(), "want", want.item(), flush=True)
         errs += int((got != want).sum().item())
     return errs
 

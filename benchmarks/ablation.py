@@ -73,25 +73,20 @@ def count_kernels(model, ids, steps: int = 5) -> int:
     """Approximate CUDA kernel launches for `steps` decode steps."""
     from torch.profiler import ProfilerActivity, profile
 
-    from minitp.generation import make_kv_cache
+    from minitp.generation import GenerationState
 
-    kv = make_kv_cache(model, ids.shape[0], ids.shape[1] + steps + 1)
-    with torch.no_grad():
-        logits, kv = prefill_wrapped(model, ids, kv)
-        nxt = model.lm_head.distributed_argmax(logits[:, -1]).squeeze(-1)
+    state = GenerationState(model, ids, steps + 1)
+    with torch.inference_mode():
+        logits = state.prefill()
+        nxt = state.select_next(logits)
         torch.cuda.synchronize()
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
             for _ in range(steps):
-                logits = model(nxt.unsqueeze(-1), kv_cache=kv)
-                nxt = model.lm_head.distributed_argmax(logits[:, -1]).squeeze(-1)
+                pos = state.append(nxt)
+                logits = state.decode_step(nxt, pos)
+                nxt = state.select_next(logits)
             torch.cuda.synchronize()
     return sum(e.count for e in prof.key_averages())
-
-
-def prefill_wrapped(model, ids, kv):
-    from minitp.generation import prefill
-
-    return prefill(model, ids, kv)
 
 
 def run_config(model, ids, new_tokens, iters, flags) -> dict:
@@ -105,9 +100,9 @@ def run_config(model, ids, new_tokens, iters, flags) -> dict:
     prefill_list, ttft_list, step_lists = [], [], []
     with ctx_mgr():
         for _ in range(iters):
-            prefill_s, first_sel_ms, step_ms = bench_one_iter(model, ids, new_tokens)
+            prefill_s, ttft_s, _sel_ms, step_ms = bench_one_iter(model, ids, new_tokens)
             prefill_list.append(prefill_s)
-            ttft_list.append(prefill_s + first_sel_ms / 1e3)
+            ttft_list.append(ttft_s)
             step_lists.append(step_ms)
     flat = [x for lst in step_lists for x in lst]
     prefill_mean = sum(prefill_list) / len(prefill_list)

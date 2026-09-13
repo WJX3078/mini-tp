@@ -134,7 +134,6 @@ class VocabParallelLMHead(nn.Module):
         The gather buffer is persistent across tokens (shape-keyed); all
         layouts are gathered along dim 0 as [tp, *leading, C].
         """
-        leading = local_logits.shape[:-1]
         if self.ctx.tp_size == 1:
             return local_logits.argmax(dim=-1, keepdim=True)  # fast path
         enc = encoding or ARGMAX_ENCODING

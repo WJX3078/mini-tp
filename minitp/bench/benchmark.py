@@ -1,16 +1,19 @@
 """mini-TP benchmark: phase-separated, multi-rank-aggregated, reproducible.
 
-Methodology (docs/BENCHMARK.md):
-- snapshot resolve (network/cache) measured separately from checkpoint load
-- prefill timed alone; TTFT = prefill + first token selection (distributed
-  argmax included); TPOT = mean of the remaining decode steps (also includes
-  selection); E2E = TTFT + TPOT*(new_tokens-1)
-- decode is ALWAYS fixed-length sync-free (no EOS check, zero GPU->CPU syncs);
-  interactive early-stop lives in generate.py only
-- multi-rank: per-rank latencies aggregated with tensor collectives; the
-  primary latency is max-across-ranks (slowest rank gates the step), skew
-  reported
-- JSON carries full environment metadata (git SHA, torch/CUDA/GPU, flags)
+Methodology v4 (docs/BENCHMARK.md):
+- snapshot resolve measured separately from checkpoint load
+- continuous TTFT: ONE outer CUDA event pair around (prefill -> first token
+  selection), no intermediate synchronize; a nested inner pair breaks out
+  prefill. Invariant: ttft >= prefill + selection - event noise.
+- TPOT: per-step samples (forward + selection). Multi-rank semantics: the
+  user-visible step latency is the per-step MAX across ranks, so the
+  benchmark keeps per-step samples per rank and reduces them ELEMENT-WISE
+  with a MAX collective after measurement (never in the hot path) —
+  mean/p50/p90/p99 are computed on the global slowest-rank samples
+  (max(mean(rank)) is a different, smaller-biased number, V04_AUDIT B5).
+- decode ALWAYS fixed-length sync-free via GenerationState — the same hot
+  path as generate_greedy (no per-token torch.arange, V04_AUDIT B3).
+- feature flags derived from the live runtime objects, not hardcoded (B6).
 """
 
 from __future__ import annotations
@@ -28,9 +31,9 @@ from transformers import AutoConfig, AutoTokenizer
 
 from minitp import __version__
 from minitp.config import ModelConfig
-from minitp.distributed import comm_summary, get_comm_stats, reset_comm_stats, set_profiling
+from minitp.distributed import get_comm_stats, reset_comm_stats, set_profiling
 from minitp.distributed.context import ParallelContext, init_context
-from minitp.generation import decode_step, make_kv_cache, prefill, select_token
+from minitp.generation import GenerationState
 from minitp.weight_loader import load_qwen2_tp
 
 
@@ -52,10 +55,10 @@ def parse_args(argv=None):
 DTYPES = {"fp32": torch.float32, "fp16": torch.float16, "bf16": torch.bfloat16}
 
 
-def _percentiles(ms: list[float]) -> dict | None:
-    if not ms:
+def _percentiles(samples: list[float]) -> dict | None:
+    if not samples:
         return None
-    xs = sorted(ms)
+    xs = sorted(samples)
 
     def pct(q: float) -> float:
         idx = max(0, min(len(xs) - 1, round(q * len(xs)) - 1 if q > 0 else 0))
@@ -91,46 +94,46 @@ def _git_metadata() -> dict:
     return {"git_commit": sha, "git_dirty": dirty}
 
 
-def bench_one_iter(model, input_ids, max_new_tokens, distributed_argmax=True):
-    """One fixed-length generation.
+def bench_one_iter(model, input_ids, max_new_tokens, distributed_argmax=True, kv_init="empty"):
+    """One fixed-length generation through GenerationState (the shared hot path).
 
-    Windows (CUDA events on GPU, perf_counter on CPU):
-      prefill            — prompt forward only
-      first_selection    — greedy pick producing token #1 (part of TTFT)
-      per decode step    — forward + selection for tokens #2..N (TPOT samples)
+    Windows (CUDA events on GPU, perf_counter on CPU), NO intermediate
+    synchronize inside the TTFT window:
+      ttft        — outer pair: prefill start -> first token selected
+      prefill     — inner pair: prompt forward only
+      per step    — forward + selection for tokens #2..N (TPOT samples)
 
-    No EOS check and no .item()/bool() inside the loop: zero GPU->CPU syncs.
-    Returns (prefill_s, first_selection_ms, step_ms list len max_new_tokens-1).
+    Returns (prefill_s, ttft_s, first_selection_ms, step_ms list).
     """
     device = input_ids.device
     use_cuda = device.type == "cuda"
-    kv = make_kv_cache(model, input_ids.shape[0], input_ids.shape[1] + max_new_tokens)
-
-    ev0, ev1 = (torch.cuda.Event(True), torch.cuda.Event(True)) if use_cuda else (None, None)
+    state = GenerationState(
+        model, input_ids, max_new_tokens, distributed_argmax=distributed_argmax, kv_init=kv_init
+    )
     if use_cuda:
-        ev0.record()
+        ttft0 = torch.cuda.Event(True)
+        prefill0, prefill1 = torch.cuda.Event(True), torch.cuda.Event(True)
+        sel1 = torch.cuda.Event(True)
+        ttft0.record()
+        prefill0.record()
     else:
         t0 = time.perf_counter()
-    logits, kv = prefill(model, input_ids, kv)
+    logits = state.prefill()
     if use_cuda:
-        ev1.record()
-        torch.cuda.synchronize()
-        prefill_s = ev0.elapsed_time(ev1) / 1e3
+        prefill1.record()
     else:
         prefill_s = time.perf_counter() - t0
-
-    if use_cuda:
-        s0, e0 = torch.cuda.Event(True), torch.cuda.Event(True)
-        s0.record()
-    else:
         t0 = time.perf_counter()
-    next_tok = select_token(model, logits, distributed_argmax)
+    tok = state.select_next(logits)
     if use_cuda:
-        e0.record()
-        torch.cuda.synchronize()
-        first_selection_ms = s0.elapsed_time(e0)
+        sel1.record()
+        torch.cuda.synchronize()  # single resolve point for the whole TTFT window
+        ttft_s = ttft0.elapsed_time(sel1) / 1e3
+        prefill_s = prefill0.elapsed_time(prefill1) / 1e3
+        first_selection_ms = prefill1.elapsed_time(sel1)
     else:
         first_selection_ms = (time.perf_counter() - t0) * 1e3
+        ttft_s = prefill_s + first_selection_ms / 1e3
 
     events = []
     for _ in range(max_new_tokens - 1):
@@ -139,8 +142,9 @@ def bench_one_iter(model, input_ids, max_new_tokens, distributed_argmax=True):
             s.record()
         else:
             t0 = time.perf_counter()
-        logits = decode_step(model, next_tok.unsqueeze(-1), kv)
-        next_tok = select_token(model, logits, distributed_argmax)
+        pos = state.append(tok)
+        logits = state.decode_step(tok, pos)
+        tok = state.select_next(logits)
         if use_cuda:
             e.record()
             events.append((s, e))
@@ -151,39 +155,43 @@ def bench_one_iter(model, input_ids, max_new_tokens, distributed_argmax=True):
         step_ms = [s.elapsed_time(e) for s, e in events]
     else:
         step_ms = [x * 1e3 for x in events]
-    return prefill_s, first_selection_ms, step_ms
+    return prefill_s, ttft_s, first_selection_ms, step_ms
 
 
-def _aggregate_across_ranks(ctx: ParallelContext, values: dict[str, float]) -> dict:
-    """Tensor-collective aggregation across TP ranks (max gates the step).
+def _aggregate_max(ctx: ParallelContext, samples: list[float]) -> list[float]:
+    """Element-wise MAX across ranks over per-step/per-iter samples.
 
-    Runs once after benchmarking — never in the hot path. TP=1 returns the
-    rank-local values unchanged.
+    Aggregation runs ONCE after measurement, on tensors placed on the process
+    group's device — NCCL requires CUDA tensors, Gloo accepts both
+    (V04_AUDIT B1). Returns the global slowest-rank samples.
     """
-    if ctx.tp_size == 1 or not dist_is_initialized(ctx):
-        return {}
-    keys = list(values)
-    local = torch.tensor([values[k] for k in keys], dtype=torch.float64)
-    mx, mn, sm = local.clone(), local.clone(), local.clone()
-    dist.all_reduce(mx, op=dist.ReduceOp.MAX, group=ctx.process_group)
-    dist.all_reduce(mn, op=dist.ReduceOp.MIN, group=ctx.process_group)
-    dist.all_reduce(sm, op=dist.ReduceOp.SUM, group=ctx.process_group)
-    mean = sm / ctx.tp_size
-    out = {}
-    for i, k in enumerate(keys):
-        out[k] = {
-            "max": round(mx[i].item(), 4),
-            "min": round(mn[i].item(), 4),
-            "mean": round(mean[i].item(), 4),
-            "skew": round((mx[i] - mn[i]).item(), 4),
-        }
-    return out
+    if ctx.tp_size == 1 or ctx.process_group is None or not dist.is_initialized():
+        return samples
+    local = torch.tensor(samples, dtype=torch.float64, device=ctx.device)
+    dist.all_reduce(local, op=dist.ReduceOp.MAX, group=ctx.process_group)
+    return local.tolist()
 
 
-def dist_is_initialized(ctx: ParallelContext) -> bool:
-    import torch.distributed as dist
-
-    return ctx.process_group is not None and dist.is_initialized()
+def _feature_flags(model, ctx: ParallelContext, loader: str, argmax_encoding: str) -> dict:
+    """Flags derived from the LIVE runtime configuration (V04_AUDIT B6)."""
+    rmsnorm_impls = sorted({layer.input_layernorm.implementation for layer in model.model.layers})
+    return {
+        "fused_qkv": bool(model.model.layers[0].self_attn.use_fused_qkv),
+        "fused_gate_up": bool(model.model.layers[0].mlp.use_fused_gateup),
+        "rope_cache": bool(model.use_rotary_cache),
+        "rmsnorm_backend": rmsnorm_impls[0] if len(rmsnorm_impls) == 1 else rmsnorm_impls,
+        "argmax_encoding": argmax_encoding,
+        "loader": loader,
+        "inference_mode": True,  # generation entry points are @torch.inference_mode
+        "kv_init": "empty",
+        "comm_backend": (
+            dist.get_backend(ctx.process_group)
+            if ctx.process_group is not None and dist.is_initialized() else "none"
+        ),
+        "nccl_available": dist.is_nccl_available(),
+        "cuda_graph": False,
+        "compile": False,
+    }
 
 
 def main(argv=None) -> None:
@@ -211,7 +219,8 @@ def main(argv=None) -> None:
     # ---- phase 1: checkpoint load (materialize + shard pack + H2D) ----
     ctx.barrier()
     t0 = time.perf_counter()
-    model = load_qwen2_tp(model_dir, cfg, ctx, dtype=dtype, device=device).eval()
+    loader = "selective"
+    model = load_qwen2_tp(model_dir, cfg, ctx, dtype=dtype, device=device, loader=loader).eval()
     checkpoint_load_s = time.perf_counter() - t0
     peak_after_load = None
     if use_cuda:
@@ -229,41 +238,37 @@ def main(argv=None) -> None:
 
     # ---- measured iterations (fixed-length, sync-free) ----
     reset_comm_stats()
-    prefill_list, ttft_list, step_lists = [], [], []
+    prefill_iters, ttft_iters, step_lists = [], [], []
     for _ in range(args.iters):
-        prefill_s, first_sel_ms, step_ms = bench_one_iter(model, ids, args.new_tokens)
-        prefill_list.append(prefill_s)
-        ttft_list.append(prefill_s + first_sel_ms / 1e3)
+        prefill_s, ttft_s, _sel_ms, step_ms = bench_one_iter(model, ids, args.new_tokens)
+        prefill_iters.append(prefill_s)
+        ttft_iters.append(ttft_s)
         step_lists.append(step_ms)
         ctx.barrier()
 
-    flat_ms = [ms for lst in step_lists for ms in lst]
-    prefill_mean = sum(prefill_list) / len(prefill_list)
-    ttft_mean = sum(ttft_list) / len(ttft_list)
-    tpot_mean = sum(flat_ms) / len(flat_ms) if flat_ms else None  # None if new_tokens == 1
+    rank_tpot_samples = [ms for lst in step_lists for ms in lst]
+    prefill_mean = sum(prefill_iters) / len(prefill_iters)
+    ttft_mean = sum(ttft_iters) / len(ttft_iters)
+    tpot_mean = sum(rank_tpot_samples) / len(rank_tpot_samples) if rank_tpot_samples else None
     e2e_s = ttft_mean + (tpot_mean * (args.new_tokens - 1) / 1e3 if tpot_mean else 0.0)
     peak_mem_gib = torch.cuda.max_memory_allocated() / 2**30 if use_cuda else 0.0
 
-    # ---- multi-rank aggregation (slowest rank gates the step) ----
-    rank_local = {
-        "prefill_s": prefill_mean,
-        "ttft_s": ttft_mean,
-        "tpot_ms": tpot_mean or 0.0,
-        "peak_mem_gib": peak_mem_gib,
-    }
-    aggregated = _aggregate_across_ranks(ctx, rank_local)
+    # ---- multi-rank aggregation: per-sample element-wise MAX (B5) ----
+    global_prefill = _aggregate_max(ctx, prefill_iters)
+    global_ttft = _aggregate_max(ctx, ttft_iters)
+    global_tpot = _aggregate_max(ctx, rank_tpot_samples)
 
     result = {
-        "schema": "minitp.bench/3",
+        "schema": "minitp.bench/4",
         "metadata": {
-            "schema_version": 3,
+            "schema_version": 4,
             **_git_metadata(),
             "timestamp_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
             "os": platform.platform(),
             "python": platform.python_version(),
             "pytorch": torch.__version__,
             "cuda": torch.version.cuda,
-            "nccl": _nccl_version_safe() if use_cuda else None,
+            "nccl": _nccl_version_safe(),
             "gpu": torch.cuda.get_device_name(0) if use_cuda else None,
             "gpu_count": torch.cuda.device_count() if use_cuda else 0,
             "minitp_version": __version__,
@@ -276,54 +281,63 @@ def main(argv=None) -> None:
             "warmup": args.warmup,
             "iters": args.iters,
             "seed": args.seed,
-            "feature_flags": {
-                "fused_qkv": True,
-                "fused_gate_up": True,
-                "rope_cache": True,
-                "selective_loader": False,  # flipped in v0.3 loader section
-                "native_gqa": False,
-                "optimized_rmsnorm": False,
-                "inference_mode": False,
-                "compile": False,
-                "cuda_graph": False,
-            },
+            "feature_flags": _feature_flags(model, ctx, loader, "bitpack"),
         },
         "load": {
             "snapshot_resolve_s": round(snapshot_resolve_s, 3),
             "checkpoint_load_s": round(checkpoint_load_s, 3),
             "note": "checkpoint_load excludes network/cache resolve",
         },
-        "prefill": {
-            "seconds_mean": round(prefill_mean, 4),
-            "prompt_tokens_per_s": round(args.batch_size * args.prompt_len / prefill_mean, 1),
-        },
-        "ttft": {"seconds_mean": round(ttft_mean, 4),
-                 "definition": "prefill + first token selection (distributed argmax included)"},
-        "decode": {
-            "tpot_ms": _percentiles(flat_ms),
+        "rank_local": {
+            "prefill": {
+                "seconds_mean": round(prefill_mean, 4),
+                "prompt_tokens_per_s": round(args.batch_size * args.prompt_len / prefill_mean, 1),
+            },
+            "ttft": {
+                "seconds_mean": round(ttft_mean, 4),
+                "definition": "CONTINUOUS: prefill start -> first token selected (one event pair)",
+            },
+            "tpot_ms": _percentiles(rank_tpot_samples),
             "tokens_per_s": round(1e3 / tpot_mean * args.batch_size, 1) if tpot_mean else None,
-            "definition": "TPOT = forward + selection per output token after the first",
-            "mode": "fixed_length_no_sync",
+            "peak_mem_gib": round(peak_mem_gib, 3) if use_cuda else None,
+        },
+        "global_slowest_rank": {
+            "note": "element-wise per-sample MAX across ranks; the slowest rank gates the step",
+            "prefill_seconds_mean": (
+                round(sum(global_prefill) / len(global_prefill), 4)
+                if global_prefill else round(prefill_mean, 4)
+            ),
+            "ttft_seconds_mean": (
+                round(sum(global_ttft) / len(global_ttft), 4)
+                if global_ttft else round(ttft_mean, 4)
+            ),
+            "tpot_ms": _percentiles(global_tpot) if global_tpot else None,
         },
         "e2e": {"seconds_mean": round(e2e_s, 4),
-                "definition": "TTFT + TPOT*(new_tokens-1)"},
+                "definition": "TTFT + TPOT*(new_tokens-1), rank-local"},
         "memory": {
-            "peak_allocated_gib_after_load": round(peak_after_load / 2**30, 3) if use_cuda else None,
-            "peak_allocated_gib": round(torch.cuda.max_memory_allocated() / 2**30, 3) if use_cuda else None,
-            "peak_reserved_gib": round(torch.cuda.max_memory_reserved() / 2**30, 3) if use_cuda else None,
+            "peak_allocated_gib_after_load": (
+                round(peak_after_load / 2**30, 3) if use_cuda else None
+            ),
+            "peak_allocated_gib": (
+                round(torch.cuda.max_memory_allocated() / 2**30, 3) if use_cuda else None
+            ),
+            "peak_reserved_gib": (
+                round(torch.cuda.max_memory_reserved() / 2**30, 3) if use_cuda else None
+            ),
         },
         "backend": "cuda_events" if use_cuda else "perf_counter",
     }
 
-    if aggregated:
-        result["multi_rank"] = {
-            "aggregation": "max/min/mean/skew across TP ranks (max gates the step)",
-            **aggregated,
+    if ctx.tp_size > 1:
+        gp, gt = global_prefill, global_ttft
+        result["rank_skew"] = {
+            "prefill_s": round(max(gp) - min(gp), 4) if len(gp) > 1 else 0.0,
+            "ttft_s": round(max(gt) - min(gt), 4) if len(gt) > 1 else 0.0,
         }
 
     if args.profile_communication:
         stats = get_comm_stats()
-        summary = comm_summary(stats)
         by_op: dict[str, dict] = {}
         for s in stats:
             agg = by_op.setdefault(
@@ -343,13 +357,12 @@ def main(argv=None) -> None:
             for k in ("host_launch_ms", "collective_gpu_ms", "postprocess_host_ms"):
                 agg[k] = round(agg[k], 3)
         result["communication"] = {
-            "calls": summary.calls,
-            "total_bytes": summary.total_bytes,
-            "host_launch_ms": round(summary.host_launch_ms, 3),
-            "collective_gpu_ms": (
-                round(summary.collective_gpu_ms, 3) if summary.collective_gpu_ms is not None else None
-            ),
-            "postprocess_host_ms": round(summary.postprocess_host_ms, 3),
+            "calls": len(stats),
+            "total_bytes": sum(s["bytes"] for s in stats),
+            "host_launch_ms": round(sum(s["host_launch_ms"] for s in stats), 3),
+            "collective_gpu_ms": round(sum(
+                s["collective_gpu_ms"] for s in stats if s["collective_gpu_ms"] is not None), 3),
+            "postprocess_host_ms": round(sum(s["postprocess_host_ms"] for s in stats), 3),
             "units": "milliseconds; bytes = input tensor (all_reduce/reduce_scatter) or output tensor (all_gather)",
             "by_op": by_op,
         }
