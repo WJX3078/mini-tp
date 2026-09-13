@@ -66,57 +66,73 @@ The bf16 greedy comparison against HF CUDA is intentionally not asserted: HF's o
 bf16 CUDA greedy output is unstable (repetition loops); in fp32 both models agree
 token-for-token, and the TP=1 CPU bf16 run also agrees with HF CPU.
 
-## Performance engineering (v0.2)
+## Performance engineering (v0.2 → v0.3)
 
-v0.2 is a measurement-driven optimization pass over the v0.1 runtime
-([docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)): profiling showed decode
-was **kernel-launch-bound** (~6,565 CUDA kernels per token, GEMMs only ~15 % of
-GPU time), so the optimizations target launch count and host overhead — with
-correctness gates on every change (logits + fp32 greedy token equality vs HF):
+Profiling showed decode was **kernel-launch-bound** (~6,565 CUDA kernels per
+token, GEMMs only ~15 % of GPU time —
+[docs/PERFORMANCE_AUDIT.md](docs/PERFORMANCE_AUDIT.md)), so the optimizations
+target launch count and host overhead. Every change has a correctness gate
+(logits + fp32 greedy token equality vs HF; no tolerance was relaxed):
 
 - **Fused QKV / fused gate+up** — per-rank shards packed into one GEMM at load
   time (7 → 4 GEMMs per layer per token; split is a zero-copy view)
-- **RoPE cache** — cos/sin tables precomputed once (fp32) instead of rebuilt in
-  all 24 layers on every forward
-- **Allocation-free decode loop** — preallocated output buffer + positions,
-  and a fixed-length benchmark mode with **zero GPU→CPU syncs per token**
-  (early-stop EOS checking remains opt-in for interactive use)
-- **Correct async communication profiler** — paired CUDA events split
-  `host_launch_ms` vs `gpu_elapsed_ms` ([docs/COMMUNICATION_PROFILING.md](docs/COMMUNICATION_PROFILING.md))
-- **Phase-separated benchmark** ([docs/BENCHMARK.md](docs/BENCHMARK.md)) —
-  prefill / per-token decode p50-p99 / e2e / load measured independently
-
-Microbenchmarks (this GPU, bf16, old vs new per hot-path op):
-
-| op | old | new | speedup |
-|---|---|---|---|
-| RoPE apply (per layer) | 0.581 ms | 0.393 ms | 1.5× |
-| QKV projection (per layer) | 0.116 ms | 0.051 ms | 2.3× |
-| gate+up projection (per layer) | 0.062 ms | 0.052 ms | 1.2× |
-| decode bookkeeping (per 256 tok, incl. v0.1's per-token sync) | 21.5 ms | 11.9 ms | 1.8× |
+- **RoPE cache** — cos/sin tables precomputed once (fp32) instead of rebuilt
+  in all 24 layers on every forward
+- **Allocation-free decode loop** — preallocated output buffer + positions;
+  benchmark decode is **fixed-length with zero GPU→CPU syncs per token**
+  (EOS early-stop stays opt-in for interactive use)
+- **Selective safetensors loader** (v0.3, default) — each rank reads only its
+  own slices via `safe_open`; real-checkpoint load **3.9 s → 3.0 s and host
+  RSS +1.32 GiB → +0.01 GiB** (legacy loader kept via `--loader legacy`)
+- **TP=1 fast paths** (v0.3) — unmasked embedding, direct argmax
+- **Correct async communication profiler** — paired CUDA events bracket only
+  the distributed op, splitting `host_launch_ms` vs `collective_gpu_ms`
+  ([docs/COMMUNICATION_PROFILING.md](docs/COMMUNICATION_PROFILING.md))
+- **Phase-separated benchmark** ([docs/BENCHMARK.md](docs/BENCHMARK.md)) with
+  TTFT/TPOT, multi-rank max/min/mean/skew aggregation, and full
+  reproducibility metadata (git SHA, GPU, versions)
 
 ## Benchmark
 
-**Measured on 1× consumer GPU (laptop, Windows, PyTorch 2.6, bf16, batch 1),
-schema `minitp.bench/2` — decode timed per token, fixed-length, sync-free.**
-TP=2/TP=4 numbers: `UNVERIFIED — requires >=2 CUDA GPUs`; run
-`scripts/run_multi_gpu_bench.sh` on a multi-GPU host to produce them.
+Environment for all measured numbers below (reported honestly, per
+[docs/BENCHMARK.md](docs/BENCHMARK.md)):
 
-| Workload (prompt+gen) | TP | prefill tok/s | decode ms/token (mean) | decode tok/s | Peak mem/GPU (GiB) |
-|---|---|---|---|---|---|
-| 128 + 32 | 1 | 2,196 | 55.7 | 17.9 | 0.99 |
-| 512 + 128 | 1 | 7,830 | 55.7 | 17.9 | 1.10 |
-| 2048 + 32 | 1 | 18,147 | 55.1 | 18.2 | 1.55 |
+- GPU: `NVIDIA GeForce RTX 4060 Laptop GPU` (single GPU), PyTorch 2.6.0+cu124
+- dtype bf16, batch 1, fixed-length sync-free decode, CUDA-event timing,
+  warmup + 3 timed iters (ablation JSONs in `benchmarks/results/`)
+- TP=2/TP=4: **UNVERIFIED — requires >=2 CUDA GPUs**
+  (`scripts/run_multi_gpu_bench.sh`)
 
-Decode improved from **~76.8 ms/token (v0.1, e2e-derived) to ~55.7 ms/token
-(v0.2, phase-measured)** — ~28 % faster; microbenchmarks attribute ≈6–7 ms to
-the three fused/cached ops and removed per-token sync, the remainder to reduced
-allocator churn and host dispatch. Memory model: weights ≈ 0.5B × 2 bytes / TP
-= **0.93 GiB at TP=1, 0.47 GiB at TP=2** per rank; measured peaks include
-activations, KV cache, and allocator overhead. At TP=2 the runtime does
-2 AllReduces × 24 layers × `B·T·896·2` bytes per forward, which on PCIe
-typically makes TP=2 slower than TP=1 for a 0.5B model — the profiler and
-theoretical model exist to quantify exactly this trade-off.
+**Apples-to-apples ablation** (`benchmarks/ablation.py`: identical harness,
+identical weights, only feature toggles differ; v0.1-equivalent path vs full
+v0.3):
+
+| metric | v0.1-equivalent | v0.3 full | delta |
+|---|---|---|---|
+| CUDA kernels / token (deterministic) | 6,952 | 5,569 | **−19.9 %** |
+| TTFT (s, prompt 512) | 0.080 | 0.061 | **−24 %** |
+| TPOT (ms, mean) | 64.9 | 56.4 | **−13 %** |
+
+(Run-to-run variance on a laptop GPU is ±5 %; the kernel count is exact.
+Per-op microbenchmarks: `python -m minitp.bench.microbench`.)
+
+Current measured performance (schema `minitp.bench/3`, v0.3 runtime):
+
+| Workload (prompt+gen) | TP | prefill tok/s | TTFT (s) | TPOT mean (ms) | decode tok/s | Peak mem/GPU (GiB) |
+|---|---|---|---|---|---|---|
+| 128 + 32 | 1 | 2,264 | 0.057 | 52.5 | 19.0 | 0.99 |
+| 512 + 128 | 1 | 7,352 | 0.070 | 56.1 | 17.8 | 1.10 |
+| 2048 + 32 | 1 | 10,228 | 0.201 | 52.2 | 19.1 | 1.56 |
+
+Memory model: weights ≈ 0.5B × 2 bytes / TP = **0.93 GiB at TP=1, 0.47 GiB at
+TP=2** per rank; measured peaks include activations, KV cache, and allocator
+overhead. At TP=2 the runtime does 2 AllReduces × 24 layers × `B·T·896·2`
+bytes per forward, which on PCIe typically makes TP=2 slower than TP=1 for a
+0.5B model — the profiler and theoretical model exist to quantify exactly
+this trade-off. Negative results are documented too: native SDPA
+`enable_gqa` measured 10–30× slower here, and a KV-head batch-fold variant
+regressed TPOT 53→65 ms — both reverted/rejected on measurement
+([docs/V03_REPORT.md](docs/V03_REPORT.md)).
 
 ## Usage
 
