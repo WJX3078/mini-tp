@@ -23,8 +23,11 @@ class KVCache:
     ) -> None:
         self.max_seq_len = max_seq_len
         self.seq_len = 0
+        # torch.empty, not zeros: attention only ever reads [:seq_len], which is
+        # written before read (fill-cursor invariant, poison-tested in
+        # tests/test_kv_cache.py) — avoids the zero-fill kernel for large caches
         self.k = [
-            torch.zeros(batch_size, kv_heads_local, max_seq_len, head_dim, dtype=dtype, device=device)
+            torch.empty(batch_size, kv_heads_local, max_seq_len, head_dim, dtype=dtype, device=device)
             for _ in range(num_layers)
         ]
         self.v = [
