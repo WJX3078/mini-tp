@@ -56,16 +56,18 @@ def _load_tp_model(hf_model, hf_cfg, ctx) -> TPQwen2ForCausalLM:
     sd = model.state_dict()
     hf_sd = hf_model.state_dict()
     tp, rank = ctx.tp_size, ctx.tp_rank
-    from minitp.weight_loader import _shard, pack_gate_up, pack_qkv
+    from minitp.weight_loader import _pack_qkv_legacy, _shard
 
     for i in range(cfg.num_hidden_layers):
         attn = f"model.layers.{i}.self_attn."
         mlp = f"model.layers.{i}.mlp."
-        qkv_w, qkv_b = pack_qkv(hf_sd, attn, rank, tp, cfg)
+        qkv_w, qkv_b = _pack_qkv_legacy(hf_sd, attn, rank, tp, cfg)
         sd[f"{attn}qkv_proj.weight"].copy_(qkv_w)
         sd[f"{attn}qkv_proj.bias"].copy_(qkv_b)
         sd[f"{attn}o_proj.weight"].copy_(_shard(hf_sd[f"{attn}o_proj.weight"], 1, rank, tp))
-        sd[f"{mlp}gate_up_proj.weight"].copy_(pack_gate_up(hf_sd, mlp, rank, tp))
+        gate = _shard(hf_sd[f"{mlp}gate_proj.weight"], 0, rank, tp)
+        up = _shard(hf_sd[f"{mlp}up_proj.weight"], 0, rank, tp)
+        sd[f"{mlp}gate_up_proj.weight"].copy_(torch.cat([gate, up], dim=0))
         sd[f"{mlp}down_proj.weight"].copy_(_shard(hf_sd[f"{mlp}down_proj.weight"], 1, rank, tp))
         sd[f"model.layers.{i}.input_layernorm.weight"].copy_(hf_sd[f"model.layers.{i}.input_layernorm.weight"])
         sd[f"model.layers.{i}.post_attention_layernorm.weight"].copy_(
