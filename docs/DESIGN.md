@@ -218,9 +218,10 @@ PyTorch axis** (`weight` is `[out, in]`):
 | (tied) `model.embed_tokens.weight` | lm_head.weight | 0 (vocab) | [75968, 896] |
 
 Loader contract: rank `r` slices `[r*n_local, (r+1)*n_local)`, copies into a
-pre-allocated local parameter, then frees the HF tensor; GPU only ever receives the local
-shard. P0 loads via `safetensors.torch.load_file` (full CPU state_dict per rank —
-honestly documented in README); P1 adds index-JSON selective tensor loading.
+pre-allocated local parameter; GPU only ever receives the local shard. Since
+v0.3 the default is the *selective* loader (`safe_open` rank-local slices, no
+full state dict); `direct_gpu` (v0.4) constructs on the target device;
+`legacy` full-state loading is kept for comparison. See docs/LOADER_PIPELINE.md.
 
 ## 12. Correctness Strategy
 
@@ -255,5 +256,7 @@ latency; PCIe lacks NVLink bandwidth).
 
 Single-node TP only; no PP/EP/MoE/ZeRO/FSDP; training not supported; contiguous (non-paged)
 KV cache; no continuous batching, quantization, CUDA graphs, or serving; checkpoint loading
-materializes the full CPU state_dict per rank in P0; KV-replication mode (`kv_heads < tp`)
+materializes the full CPU state_dict only in the legacy loader; the default
+selective loader reads rank-local slices (docs/LOADER_PIPELINE.md).
+KV-replication mode (`kv_heads < tp`)
 untested against real checkpoints (Qwen2.5-0.5B has 2 KV heads, so TP=2/4 shard evenly).

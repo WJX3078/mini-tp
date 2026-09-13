@@ -111,7 +111,6 @@ def test_reader_names_single_file_and_sharded(tmp_path):
     returned [] for single-file, hiding the fused-QKV bias)."""
     from minitp.weight_loader import SelectiveTensorReader
 
-    cfg = _cfg()
     model_dir = _make_checkpoint(tmp_path)
     reader = SelectiveTensorReader(model_dir)
     names = set(reader.names())

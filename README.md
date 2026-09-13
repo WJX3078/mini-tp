@@ -180,8 +180,9 @@ This is a **from-scratch educational distributed inference runtime**, not
 production-ready. Single-node TP only; no pipeline/MoE/ZeRO/FSDP, no training, no
 paged KV / continuous batching / speculative decoding, no quantization, no HTTP
 serving (see the companion mini-vLLM project for serving/scheduling), no CUDA
-graphs. P0 checkpoint loading materializes the full CPU state_dict per rank
-(selective safetensors loading is a P1). `kv_heads < tp_size` replication is
+graphs. The default selective loader never materializes the full CPU state
+dict (legacy full-state loader kept for comparison; see
+docs/LOADER_PIPELINE.md). `kv_heads < tp_size` replication is
 implemented but untested against real checkpoints. All multi-GPU benchmark numbers
 are marked `UNVERIFIED` until executed on real hardware.
 
