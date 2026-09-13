@@ -67,7 +67,7 @@ def test_nccl_argmax_bitpack_and_fast_path():
             logits[0, :] = -1e30
             logits[0, target - s] = 5.0
         got = head.distributed_argmax(logits, encoding="bitpack").item()
-        want = max(16_777_217, vocab - 3)  # both 5.0; bitpack ties -> ... values equal, smaller id wins
+        # both candidates carry 5.0; equal keys resolve to the smaller id
         assert got == 16_777_217, got
     finally:
         dist.destroy_process_group()

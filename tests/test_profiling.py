@@ -1,7 +1,6 @@
 """Optional profiler labels: scopes appear in a torch.profiler trace only
 when enabled, and cost nothing when off."""
 
-import pytest
 import torch
 
 from minitp import profiling
