@@ -146,3 +146,43 @@ def test_lm_head_tp1():
     with torch.no_grad():
         head.weight.copy_(W)
     torch.testing.assert_close(head(x), F.linear(x, W), atol=1e-5, rtol=1e-5)
+
+
+def test_argmax_large_ids_and_ties_tp1():
+    """Regression (v0.1 bug class): ids must survive the pair-encoding exactly."""
+    head = VocabParallelLMHead(4, 200000, _make_ctx())
+    for vocab_id in (12095, 50000, 150000):
+        logits = torch.zeros(1, 200000)
+        logits[0, vocab_id] = 3.5
+        assert head.distributed_argmax(logits).item() == vocab_id, vocab_id
+    # exact tie -> smaller id wins (torch.argmax semantics)
+    logits = torch.zeros(1, 200000)
+    logits[0, 150000] = 1.0
+    logits[0, 4242] = 1.0
+    assert head.distributed_argmax(logits).item() == 4242
+
+
+def _tp2_uneven_gather_logits(rank, tp):
+    """gather_logits with uneven vocab (9, tp=2) must assemble the full row."""
+    from minitp.distributed.context import ParallelContext as PC
+    ctx = PC(rank, rank, tp, rank, tp, torch.device("cpu"), dist.group.WORLD)
+    head = VocabParallelLMHead(8, 9, ctx, gather_logits=True)
+    torch.manual_seed(21)
+    W = torch.randn(9, 8)
+    s, e = shard_range(9, rank, tp)
+    with torch.no_grad():
+        head.weight.copy_(W[s:e])
+    x = torch.randn(2, 4, 8)
+    got = head(x)
+    ref = F.linear(x, W)
+    return (got - ref).abs().max().item()
+
+
+@pytest.mark.distributed
+def test_tp2_uneven_gather_logits_gloo():
+    if os.environ.get("SKIP_DISTRIBUTED_TESTS"):
+        pytest.skip("distributed tests disabled")
+    from tests.distributed.harness import run_tp2
+
+    r = run_tp2(_tp2_uneven_gather_logits)
+    assert max(r.values()) < 1e-5, r
