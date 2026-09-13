@@ -1,5 +1,7 @@
 # mini-TP — From-Scratch Tensor Parallel LLM Inference Runtime
 
+*From-scratch, educational tensor-parallel inference runtime (v0.3).*
+
 An **educational, from-scratch tensor-parallel inference runtime**: the Transformer
 sharding math, collective communication, weight loading, and KV-cache decode are all
 implemented directly on `torch.distributed` (NCCL/Gloo). HuggingFace `transformers` is
@@ -159,14 +161,17 @@ pytest tests/ -m "not multi_gpu and not model"
 ```text
 minitp/
   distributed/   context (process group/TP topology), instrumented collectives
-  parallel/      Column/Row parallel linear, vocab-parallel embedding + LM head
+  parallel/      Column/Row linear, vocab-parallel embedding + LM head, fused QKV / gate-up packs
   config.py      lightweight Qwen2 config + TP divisibility validation
-  rope.py, attention.py, mlp.py, layer.py   TP Qwen2 modules
+  rope.py, attention.py, mlp.py, layer.py   TP Qwen2 modules (RoPE cache shared across layers)
   kv_cache.py    per-rank contiguous KV cache
-  weight_loader.py  HF checkpoint → per-rank shards
-  generation.py  prefill + KV-cache decode + distributed greedy sampling
-  generate.py    CLI          bench/  benchmark + communication/memory tooling
-docs/            DESIGN, QWEN_WEIGHT_MAPPING, REVIEW
+  weight_loader.py  selective safetensors loader (rank-local slices) + legacy full-state loader
+  generation.py  prefill / decode split, preallocated buffers, sync-free fixed-length decode
+  generate.py    CLI          bench/  benchmark, microbench, collective benchmark
+benchmarks/      ablation harness + measured result JSONs
+docs/            DESIGN, PERFORMANCE_AUDIT, V03_AUDIT, V03_REPORT, V02_PROFILE_RESULT,
+                 BENCHMARK, COMMUNICATION_PROFILING, TP_SCALING, CUDA_GRAPH_FEASIBILITY,
+                 QWEN_WEIGHT_MAPPING, REVIEW
 ```
 
 ## Scope & known limitations
