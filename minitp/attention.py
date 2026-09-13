@@ -10,7 +10,7 @@ from minitp.config import ModelConfig
 from minitp.distributed.context import ParallelContext
 from minitp.kv_cache import KVCache
 from minitp.parallel.linear import ColumnParallelLinear, RowParallelLinear
-from minitp.rope import apply_rope
+from minitp.rope import RotaryEmbedding, apply_rope
 
 
 class TPQwen2Attention(nn.Module):
@@ -44,13 +44,17 @@ class TPQwen2Attention(nn.Module):
         positions: torch.Tensor,  # [T]
         kv_cache: KVCache | None,
         layer_idx: int,
+        rotary: RotaryEmbedding | None = None,
     ) -> torch.Tensor:
         b, t, _ = x.shape
         q = self.q_proj(x).view(b, t, self.q_heads_local, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
 
-        q, k = apply_rope(q, k, positions, self.cfg.rope_theta)
+        if rotary is not None:
+            q, k = rotary.apply(q, k, positions)
+        else:
+            q, k = apply_rope(q, k, positions, self.cfg.rope_theta)
 
         if kv_cache is not None:
             cache_len = kv_cache.seq_len

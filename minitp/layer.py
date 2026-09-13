@@ -11,6 +11,7 @@ from minitp.distributed.context import ParallelContext
 from minitp.kv_cache import KVCache
 from minitp.mlp import TPQwen2MLP
 from minitp.parallel.embedding import VocabParallelEmbedding, VocabParallelLMHead
+from minitp.rope import RotaryEmbedding
 
 
 class RMSNorm(nn.Module):
@@ -43,8 +44,9 @@ class TPQwen2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         kv_cache: KVCache | None,
         layer_idx: int,
+        rotary: RotaryEmbedding | None = None,
     ) -> torch.Tensor:
-        x = x + self.self_attn(self.input_layernorm(x), positions, kv_cache, layer_idx)
+        x = x + self.self_attn(self.input_layernorm(x), positions, kv_cache, layer_idx, rotary)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
@@ -54,6 +56,7 @@ class TPQwen2ForCausalLM(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.ctx = ctx
+        self.rotary: RotaryEmbedding | None = None  # lazily built on first forward
         self.model = nn.Module()
         self.model.embed_tokens = VocabParallelEmbedding(cfg.vocab_size, cfg.hidden_size, ctx)
         self.model.layers = nn.ModuleList(
@@ -76,8 +79,13 @@ class TPQwen2ForCausalLM(nn.Module):
             offset = kv_cache.seq_len if kv_cache is not None and t == 1 else 0
             positions = torch.arange(offset, offset + t, device=input_ids.device)
         x = self.model.embed_tokens(input_ids)
+        if self.rotary is None or self.rotary.cos_cache.device != x.device:
+            # shared across layers; built once on the model's device
+            self.rotary = RotaryEmbedding(
+                self.cfg.head_dim, self.cfg.rope_theta, self.cfg.max_position_embeddings, x.device
+            )
         for i, layer in enumerate(self.model.layers):
-            x = layer(x, positions, kv_cache, i)
+            x = layer(x, positions, kv_cache, i, self.rotary)
         if kv_cache is not None:
             kv_cache.advance(t)
         x = self.model.norm(x)
