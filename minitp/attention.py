@@ -40,6 +40,9 @@ class TPQwen2Attention(nn.Module):
             cfg.hidden_size, q_rows, kv_rows, ctx, bias=True
         )
         self.o_proj = RowParallelLinear(cfg.hidden_size, cfg.hidden_size, ctx, bias=False)
+        # ablation toggle: False reproduces the v0.1 three-GEMM pattern on the
+        # SAME packed storage (weight row views), so only the GEMM count differs
+        self.use_fused_qkv = True
 
     def forward(
         self,
@@ -50,7 +53,7 @@ class TPQwen2Attention(nn.Module):
         rotary: RotaryEmbedding | None = None,
     ) -> torch.Tensor:
         b, t, _ = x.shape
-        qkv = self.qkv_proj(x)
+        qkv = self.qkv_proj(x) if self.use_fused_qkv else self.qkv_proj.forward_unfused(x)
         q = qkv[0].view(b, t, self.q_heads_local, self.head_dim).transpose(1, 2)
         k = qkv[1].view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)
         v = qkv[2].view(b, t, self.kv_heads_local, self.head_dim).transpose(1, 2)

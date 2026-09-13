@@ -14,6 +14,10 @@ v0.2 hot-path rules (see docs/PERFORMANCE_AUDIT.md):
 
 ``prefill``/``decode_step`` are exposed separately so benchmarks can time the
 two phases (and each decode token) without re-implementing the loop.
+
+All entry points run under ``torch.inference_mode`` (measured ~8 % faster than
+``no_grad`` on the v0.3 ablation harness, docs/V03_REPORT.md); inference
+tensors are returned, which is safe for greedy decoding.
 """
 
 from __future__ import annotations
@@ -41,7 +45,7 @@ def make_kv_cache(model: TPQwen2ForCausalLM, batch_size: int, max_seq_len: int) 
     )
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def prefill(
     model: TPQwen2ForCausalLM,
     input_ids: torch.Tensor,  # [B, T] identical on every rank
@@ -55,7 +59,7 @@ def prefill(
     return logits, kv
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def decode_step(
     model: TPQwen2ForCausalLM,
     token: torch.Tensor,  # [B, 1]
@@ -82,7 +86,7 @@ def select_token(
     return full.argmax(dim=-1)
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def generate_greedy(
     model: TPQwen2ForCausalLM,
     input_ids: torch.Tensor,  # [B, T_prompt] identical on every rank

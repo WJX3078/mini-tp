@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from minitp.attention import TPQwen2Attention
 from minitp.config import ModelConfig
@@ -22,8 +23,14 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.eps = eps
+        # "reference" (7-kernel hand-written) vs "functional" (F.rms_norm,
+        # single fused kernel). Default stays reference until the v0.3
+        # experiment proves functional is faster AND numerically equivalent.
+        self.implementation = "reference"
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.implementation == "functional" and hasattr(F, "rms_norm"):
+            return F.rms_norm(x, (x.shape[-1],), self.weight, self.eps)
         dtype = x.dtype
         x = x.float()
         x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -57,6 +64,7 @@ class TPQwen2ForCausalLM(nn.Module):
         self.cfg = cfg
         self.ctx = ctx
         self.rotary: RotaryEmbedding | None = None  # lazily built on first forward
+        self.use_rotary_cache = True  # ablation toggle
         self.model = nn.Module()
         self.model.embed_tokens = VocabParallelEmbedding(cfg.vocab_size, cfg.hidden_size, ctx)
         self.model.layers = nn.ModuleList(
@@ -79,13 +87,17 @@ class TPQwen2ForCausalLM(nn.Module):
             offset = kv_cache.seq_len if kv_cache is not None and t == 1 else 0
             positions = torch.arange(offset, offset + t, device=input_ids.device)
         x = self.model.embed_tokens(input_ids)
-        if self.rotary is None or self.rotary.cos_cache.device != x.device:
-            # shared across layers; built once on the model's device
-            self.rotary = RotaryEmbedding(
-                self.cfg.head_dim, self.cfg.rope_theta, self.cfg.max_position_embeddings, x.device
-            )
+        rotary = None
+        if self.use_rotary_cache:
+            if self.rotary is None or self.rotary.cos_cache.device != x.device:
+                # shared across layers; built once on the model's device
+                self.rotary = RotaryEmbedding(
+                    self.cfg.head_dim, self.cfg.rope_theta,
+                    self.cfg.max_position_embeddings, x.device,
+                )
+            rotary = self.rotary
         for i, layer in enumerate(self.model.layers):
-            x = layer(x, positions, kv_cache, i, self.rotary)
+            x = layer(x, positions, kv_cache, i, rotary)
         if kv_cache is not None:
             kv_cache.advance(t)
         x = self.model.norm(x)

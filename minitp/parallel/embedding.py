@@ -30,9 +30,10 @@ class VocabParallelEmbedding(nn.Module):
         start, end = shard_range(vocab_size, ctx.tp_rank, ctx.tp_size)
         self.vocab_start, self.vocab_end = start, end
         self.weight = nn.Parameter(torch.zeros(end - start, hidden_size))
+        self.tp1_fast = True  # ablation toggle
 
     def forward(self, ids: torch.Tensor) -> torch.Tensor:
-        if self.ctx.tp_size == 1:
+        if self.ctx.tp_size == 1 and self.tp1_fast:
             return F.embedding(ids, self.weight)  # fast path: no mask, no reduce
         mask = (ids >= self.vocab_start) & (ids < self.vocab_end)
         local_ids = (ids - self.vocab_start).clamp(min=0) * mask

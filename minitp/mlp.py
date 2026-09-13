@@ -26,7 +26,11 @@ class TPQwen2MLP(nn.Module):
             cfg.hidden_size, self.intermediate_local, ctx, bias=False
         )
         self.down_proj = RowParallelLinear(cfg.intermediate_size, cfg.hidden_size, ctx, bias=False)
+        # ablation toggle: False = v0.1 two-GEMM pattern on the same storage
+        self.use_fused_gateup = True
 
     def forward(self, x):
-        gate, up = self.gate_up_proj(x)
+        gate, up = (
+            self.gate_up_proj(x) if self.use_fused_gateup else self.gate_up_proj.forward_unfused(x)
+        )
         return self.down_proj(F.silu(gate) * up)

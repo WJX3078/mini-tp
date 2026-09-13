@@ -58,6 +58,19 @@ class FusedQKVColumnParallelLinear(nn.Module):
         q, k, v = torch.split(y, [self.q_out_local, self.kv_out_local, self.kv_out_local], dim=-1)
         return q, k, v
 
+    def forward_unfused(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Reference v0.1 compute pattern: 3 GEMMs on row views of the same
+        # packed parameter. Ablation only - mathematically identical.
+        q_rows, kv_rows = self.q_out_local, self.kv_out_local
+        w, b = self.weight, self.bias
+        b1 = b[:q_rows] if b is not None else None
+        b2 = b[q_rows : q_rows + kv_rows] if b is not None else None
+        b3 = b[q_rows + kv_rows :] if b is not None else None
+        q = F.linear(x, w[:q_rows], b1)
+        k = F.linear(x, w[q_rows : q_rows + kv_rows], b2)
+        v = F.linear(x, w[q_rows + kv_rows :], b3)
+        return q, k, v
+
 
 class FusedGateUpColumnParallelLinear(nn.Module):
     def __init__(
@@ -85,3 +98,12 @@ class FusedGateUpColumnParallelLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         y = F.linear(x, self.weight, self.bias)
         return torch.chunk(y, 2, dim=-1)  # (gate, up) views
+
+    def forward_unfused(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Reference v0.1 pattern: 2 GEMMs on row views of the same parameter.
+        n = self.intermediate_local
+        b = self.bias
+        return (
+            F.linear(x, self.weight[:n], b[:n] if b is not None else None),
+            F.linear(x, self.weight[n:], b[n:] if b is not None else None),
+        )
