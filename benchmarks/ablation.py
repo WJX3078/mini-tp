@@ -39,21 +39,23 @@ RESULTS_DIR = Path(__file__).parent / "results"
 
 CONFIGS = [
     ("v01_equivalent", dict(rotary=False, fused_qkv=False, fused_gateup=False,
-                            tp1_fast=False, inference_mode=False, rmsnorm_fn=False)),
+                            tp1_fast=False, inference_mode=False, rmsnorm="reference")),
     ("v01+rope_cache", dict(rotary=True, fused_qkv=False, fused_gateup=False,
-                            tp1_fast=False, inference_mode=False, rmsnorm_fn=False)),
+                            tp1_fast=False, inference_mode=False, rmsnorm="reference")),
     ("+fused_qkv", dict(rotary=True, fused_qkv=True, fused_gateup=False,
-                        tp1_fast=False, inference_mode=False, rmsnorm_fn=False)),
+                        tp1_fast=False, inference_mode=False, rmsnorm="reference")),
     ("+fused_gateup", dict(rotary=True, fused_qkv=True, fused_gateup=True,
-                           tp1_fast=False, inference_mode=False, rmsnorm_fn=False)),
+                           tp1_fast=False, inference_mode=False, rmsnorm="reference")),
     ("+tp1_fastpaths", dict(rotary=True, fused_qkv=True, fused_gateup=True,
-                            tp1_fast=True, inference_mode=False, rmsnorm_fn=False)),
+                            tp1_fast=True, inference_mode=False, rmsnorm="reference")),
     ("+inference_mode", dict(rotary=True, fused_qkv=True, fused_gateup=True,
-                             tp1_fast=True, inference_mode=True, rmsnorm_fn=False)),
+                             tp1_fast=True, inference_mode=True, rmsnorm="reference")),
     ("+rmsnorm_fn", dict(rotary=True, fused_qkv=True, fused_gateup=True,
-                         tp1_fast=True, inference_mode=True, rmsnorm_fn=True)),
-    ("v03_full", dict(rotary=True, fused_qkv=True, fused_gateup=True,
-                      tp1_fast=True, inference_mode=True, rmsnorm_fn=True)),
+                         tp1_fast=True, inference_mode=True, rmsnorm="functional")),
+    ("+rmsnorm_compiled", dict(rotary=True, fused_qkv=True, fused_gateup=True,
+                               tp1_fast=True, inference_mode=True, rmsnorm="compiled")),
+    ("v04_full", dict(rotary=True, fused_qkv=True, fused_gateup=True,
+                      tp1_fast=True, inference_mode=True, rmsnorm="compiled")),
 ]
 
 
@@ -62,10 +64,8 @@ def apply_config(model, flags: dict) -> None:
     for layer in model.model.layers:
         layer.self_attn.use_fused_qkv = flags["fused_qkv"]
         layer.mlp.use_fused_gateup = flags["fused_gateup"]
-        layer.input_layernorm.implementation = "functional" if flags["rmsnorm_fn"] else "reference"
-        layer.post_attention_layernorm.implementation = (
-            "functional" if flags["rmsnorm_fn"] else "reference"
-        )
+        layer.input_layernorm.implementation = flags["rmsnorm"]
+        layer.post_attention_layernorm.implementation = flags["rmsnorm"]
     model.model.embed_tokens.tp1_fast = flags["tp1_fast"]
 
 
@@ -179,7 +179,7 @@ def main(argv=None) -> None:
         )
 
     result = {
-        "schema": "minitp.ablation/1",
+        "schema": "minitp.ablation/2",
         "model": args.model,
         "dtype": args.dtype,
         "gpu": torch.cuda.get_device_name(0) if device.type == "cuda" else None,

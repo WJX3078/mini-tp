@@ -1,6 +1,6 @@
 [project]
 name = "mini-tp"
-version = "0.3.0"
+version = "0.4.0"
 description = "From-scratch Tensor Parallel LLM inference runtime (educational)"
 requires-python = ">=3.10"
 dependencies = [

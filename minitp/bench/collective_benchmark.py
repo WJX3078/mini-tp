@@ -135,7 +135,7 @@ def main_from_args(args_dict: dict) -> None:
             xs = sorted(samples)
             n_i = len(xs)
 
-            def pct(q):
+            def pct(q, xs=xs, n_i=n_i):
                 return round(xs[max(0, min(n_i - 1, round(q * n_i) - 1))] * 1e3, 1)
 
             ms = sum(xs) / n_i

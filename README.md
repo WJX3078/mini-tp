@@ -1,6 +1,6 @@
 # mini-TP — From-Scratch Tensor Parallel LLM Inference Runtime
 
-*From-scratch, educational tensor-parallel inference runtime (v0.3).*
+*From-scratch, educational tensor-parallel inference runtime (v0.4).*
 
 An **educational, from-scratch tensor-parallel inference runtime**: the Transformer
 sharding math, collective communication, weight loading, and KV-cache decode are all
@@ -67,6 +67,38 @@ Verified against HuggingFace `Qwen2ForCausalLM` on the real `Qwen2.5-0.5B` check
 The bf16 greedy comparison against HF CUDA is intentionally not asserted: HF's own
 bf16 CUDA greedy output is unstable (repetition loops); in fp32 both models agree
 token-for-token, and the TP=1 CPU bf16 run also agrees with HF CPU.
+
+## v0.4: multi-GPU correctness + measurement integrity
+
+v0.4 is an adversarial audit round ([docs/V04_AUDIT.md](docs/V04_AUDIT.md))
+that found and fixed 11 hidden bugs — the headline items:
+
+- **Benchmark path = shipped path**: one `GenerationState` drives
+  `generate_greedy`, the benchmark, and the ablation (v0.3's benchmark
+  quietly rebuilt per-token positions: 10 `torch.arange`/iteration vs 2).
+- **Honest multi-rank semantics**: aggregation collectives on the process
+  group's device (CPU tensors crash NCCL), and per-step element-wise MAX
+  across ranks — `mean(step max)`, not the smaller-biased `max(mean(rank))`.
+- **Continuous TTFT**: one event pair spans prefill → first token selection.
+- **Precision-safe distributed argmax**: bit-packed fp32-key/int64-id
+  encoding, exact for any vocab < 2^32 (the fp32 path silently rounded odd
+  ids ≥ 2^24: 16_777_217 → 16_777_216, measured).
+- **KV cache**: V also `torch.empty` (with rewritten, actually-failing
+  poison tests — the v0.3 ones contained `assert ... or True`).
+- **Loader**: no random init + NaN-coverage audit; `direct_gpu` path;
+  [docs/LOADER_PIPELINE.md](docs/LOADER_PIPELINE.md).
+- **compiled RMSNorm**: bit-exact to the reference path and 2.5–3.3× faster
+  (corrects the v0.3 "only the numerically-shifting kernel is fast"
+  conclusion); default remains `reference`.
+- Small-message collective study: the real 1792 B decode AllReduce is
+  ~525 µs p50 on Gloo loopback — purely latency-bound
+  ([docs/TP_SCALING.md](docs/TP_SCALING.md)).
+- Negative results kept: async AllReduce does not overlap (dependency
+  analysis + measurement), symmetric memory not available on this host,
+  `direct_gpu` slower on 0.5B.
+
+Full answers: [docs/V04_REPORT.md](docs/V04_REPORT.md); test-quality audit:
+[docs/TEST_AUDIT.md](docs/TEST_AUDIT.md).
 
 ## Performance engineering (v0.2 → v0.3)
 

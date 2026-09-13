@@ -34,8 +34,11 @@ def bench(fn, shape, iters=200):
 for shape in [(1, 1, H), (1, 512, H)]:
     x = torch.randn(*shape, device=device, dtype=dtype) * 3
     u = torch.randn(*shape, device=device, dtype=dtype)
-    eager = lambda a, b: reference(a, b, w)
-    comp = lambda a, b: fused(a, b, w)
+    def eager(a, b):
+        return reference(a, b, w)
+
+    def comp(a, b):
+        return fused(a, b, w)
     xr, nr = eager(x, u)
     xf, nf = comp(x, u)
     same = torch.equal(xr, xf) and torch.equal(nr, nf)
